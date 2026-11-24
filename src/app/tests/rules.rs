@@ -731,3 +731,149 @@ fn startup_splash_window_does_not_suppress_bundle_route_for_main_window() {
         Some(WorkspaceId::TWO)
     );
 }
+
+#[test]
+fn non_resizable_window_follows_route_rule_as_floating_across_hidden_and_visible_displays() {
+    let cancelled = AtomicBool::new(false);
+    let panel = window(10);
+    let initial = frame(50);
+
+    // Hidden workspace on Secondary: parks off Main, translates recovery to Secondary, suppresses
+    // focus follow, and restores onto Secondary when switched to.
+    let mut obs = observation(&panel, initial);
+    if let crate::AppObservation::Complete { windows, .. } = &mut obs.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        focused: Some(panel.clone()),
+        frontmost: Some(panel.app.clone()),
+        observation: Some(obs),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(panel.clone(), initial);
+    let to_seven = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 7",
+    )
+    .unwrap();
+    let mut rt = runtime_with_config(backend, to_seven);
+
+    rt.cycle(outputs(), &cancelled).unwrap();
+
+    let seven = WorkspaceId::new(7).unwrap();
+    assert_eq!(rt.workspaces.workspace_of(&panel), None);
+    assert_eq!(rt.workspaces.floating_workspace_of(&panel), Some(seven));
+    assert!(rt.parked.contains_key(&panel));
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(rt.parked[&panel])
+    );
+    assert_eq!(rt.suppressed_focus.as_ref(), Some(&panel));
+
+    // A second cycle must not focus-follow back to hidden workspace 7.
+    rt.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        rt.workspaces.active_for(&DisplaySelector::Secondary),
+        Some(WorkspaceId::SIX)
+    );
+
+    // Switching to workspace 7 restores the non-resizable window floating on Secondary.
+    rt.switch(seven, outputs(), &cancelled).unwrap();
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(rt.backend.frames[&panel])
+    );
+
+    // Visible workspace on Secondary: carried directly onto Secondary while staying floating.
+    let panel_vis = window(20);
+    let mut obs = observation(&panel_vis, initial);
+    if let crate::AppObservation::Complete { windows, .. } = &mut obs.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(obs),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(panel_vis.clone(), initial);
+    let to_six = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    let mut rt = runtime_with_config(backend, to_six);
+    rt.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(rt.workspaces.workspace_of(&panel_vis), None);
+    assert_eq!(
+        rt.workspaces.floating_workspace_of(&panel_vis),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(rt.backend.frames[&panel_vis])
+    );
+}
+
+#[test]
+fn first_observation_routes_all_open_windows_of_app_while_later_windows_stay_active() {
+    let cancelled = AtomicBool::new(false);
+    let first = window(10);
+    let second = window(11);
+    let third = window(12);
+    let later = window(13);
+    let mut obs = observation_for_windows(
+        "com.example.Test",
+        &first,
+        &[
+            (first.clone(), frame(50)),
+            (second.clone(), frame(120)),
+            (third.clone(), frame(190)),
+        ],
+    );
+    // Include one non-resizable window plus two already-open resizable windows.
+    if let crate::AppObservation::Complete { windows, .. } = &mut obs.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        focused: Some(second.clone()),
+        frontmost: Some(second.app.clone()),
+        observation: Some(obs),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(first.clone(), frame(50));
+    backend.frames.insert(second.clone(), frame(120));
+    backend.frames.insert(third.clone(), frame(190));
+    let config = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut rt = runtime_with_config(backend, config);
+
+    rt.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        rt.workspaces.floating_workspace_of(&first),
+        Some(WorkspaceId::TWO)
+    );
+    assert_eq!(rt.workspaces.workspace_of(&second), Some(WorkspaceId::TWO));
+    assert_eq!(rt.workspaces.workspace_of(&third), Some(WorkspaceId::TWO));
+    assert!(rt.parked.contains_key(&first));
+    assert!(rt.parked.contains_key(&second));
+    assert!(rt.parked.contains_key(&third));
+
+    // A window opened in a later cycle stays on the active workspace (Workspace 1).
+    rt.backend.frames.insert(later.clone(), frame(200));
+    rt.backend.observation = Some(observation_for_windows(
+        "com.example.Test",
+        &later,
+        &[(later.clone(), frame(200))],
+    ));
+    rt.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(rt.workspaces.workspace_of(&later), Some(WorkspaceId::ONE));
+}

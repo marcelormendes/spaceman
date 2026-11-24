@@ -24,6 +24,10 @@ struct ReconcileDisplayContext<'a> {
     affinity_policy: &'a FrozenAffinityPolicy,
     server_frames: Option<&'a HashMap<u32, crate::Rect>>,
     onscreen_frames: Option<&'a HashMap<u32, crate::Rect>>,
+    focus: (
+        Option<&'a crate::PhysicalWindowId>,
+        Option<&'a AppInstanceId>,
+    ),
     cancelled: &'a AtomicBool,
     failed: &'a mut usize,
     close_recheck: &'a mut Option<Instant>,
@@ -195,6 +199,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .map_err(|error| format!("Observation error: {error}"))?;
         let affinity_policy =
             self.freeze_window_affinities(&observation, &visible, server_frames)?;
+        self.apply_floating_routes(
+            &affinity_policy.floating_routes,
+            &visible,
+            &outputs,
+            (focused.as_ref(), frontmost.as_ref()),
+            &mut failed,
+        );
         // Taken after the Accessibility snapshot so a window listed here was
         // on screen no earlier than the snapshot that may have omitted it.
         let onscreen_snapshot = self.backend.onscreen_window_frames();
@@ -211,6 +222,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     affinity_policy: &affinity_policy,
                     server_frames: server_snapshot.as_ref(),
                     onscreen_frames: onscreen_snapshot.as_ref(),
+                    focus: (focused.as_ref(), frontmost.as_ref()),
                     cancelled,
                     failed: &mut failed,
                     close_recheck: &mut close_recheck,
@@ -463,6 +475,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             affinity_policy,
             server_frames,
             onscreen_frames,
+            focus,
             cancelled,
             failed,
             close_recheck,
@@ -565,27 +578,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 _ => None,
             })
             .collect();
-        let mut routed_targets = HashSet::new();
-        for (window, target) in &routes {
-            if !affinity_policy.visible_workspaces.contains(target) {
-                let target_output = output_for(&self.workspaces, *target, outputs);
-                match self.park_window_across(window, output, target_output, outputs) {
-                    macos::ApplyOutcome::Applied => {}
-                    macos::ApplyOutcome::Gone => {
-                        self.forget_window(workspace, window);
-                        continue;
-                    }
-                    _ => {
-                        *failed += 1;
-                        continue;
-                    }
-                }
-            }
-            if self.workspaces.move_window(window, *target).is_none() {
-                continue;
-            }
-            routed_targets.insert(*target);
-        }
+        let routed_targets =
+            self.apply_inserted_routes(resolved, &routes, affinity_policy, outputs, focus, failed);
         for decision in &reconciliation.decisions {
             let Decision::WindowInserted { window, .. } = decision else {
                 continue;

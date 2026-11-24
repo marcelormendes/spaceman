@@ -4,15 +4,79 @@
 
 use super::*;
 
-/// The displays the runtime last saw, and the hidden windows still to re-park
-/// since they changed.
+/// The displays the runtime last saw, the hidden windows still to re-park
+/// since they changed, and workspaces whose display assignment changed on
+/// config reload.
 #[derive(Default)]
 pub(super) struct DisplayWatch {
     known: Option<macos::DisplayOutputs>,
     repark_pending: HashSet<crate::PhysicalWindowId>,
+    reassigned: HashSet<WorkspaceId>,
 }
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
+    /// Apply workspace assignments from `config` and queue any workspace whose
+    /// display assignment changed for relocation on the next cycle.
+    pub(super) fn configure_workspaces_from(&mut self, config: &Config) {
+        let before: Vec<_> = WorkspaceId::all()
+            .map(|workspace| (workspace, self.workspaces.assignment(workspace).clone()))
+            .collect();
+        config.configure_workspaces(&mut self.workspaces);
+        for (workspace, previous) in before {
+            if self.workspaces.assignment(workspace) != &previous {
+                self.displays.reassigned.insert(workspace);
+            }
+        }
+    }
+
+    /// Translate parked recovery frames and carry visible floating windows for
+    /// workspaces whose display assignment changed on config reload. Runs once
+    /// before `restore_visible` (for already-parked windows and visible floats)
+    /// and once after `park_inactive` (for windows that just parked because
+    /// their workspace became hidden on its new display).
+    pub(super) fn relocate_reassigned_workspaces(
+        &mut self,
+        outputs: &macos::DisplayOutputs,
+        visible: &[ResolvedWorkspace],
+        before_park: bool,
+        failed: &mut usize,
+    ) {
+        if self.displays.reassigned.is_empty() {
+            return;
+        }
+        let visible_workspaces: HashSet<_> =
+            visible.iter().map(|resolved| resolved.workspace).collect();
+        for workspace in std::mem::take(&mut self.displays.reassigned) {
+            let new_output = output_for(&self.workspaces, workspace, outputs);
+            let is_visible = visible_workspaces.contains(&workspace);
+            let mut keep = false;
+            for window in self.workspaces.windows(workspace) {
+                if self.parked.contains_key(&window) {
+                    if !self.relocate_parked_recovery(&window, None, new_output, outputs) {
+                        *failed += 1;
+                        keep = true;
+                    }
+                } else if is_visible
+                    && self.workspaces.floating_workspace_of(&window) == Some(workspace)
+                {
+                    if let Some(from_output) = self.window_display_output(&window, outputs)
+                        && from_output != new_output
+                        && !self.carry_floating_window(&window, from_output, new_output)
+                    {
+                        *failed += 1;
+                        keep = true;
+                    }
+                } else if before_park && !is_visible && !self.parking_exempt.contains(&window) {
+                    // Wait for `park_inactive` to park this window, then translate its recovery.
+                    keep = true;
+                }
+            }
+            if keep {
+                self.displays.reassigned.insert(workspace);
+            }
+        }
+    }
+
     /// How tiles fill `output`: its frame with the configured gaps, padding and width cap.
     pub(super) fn layout_settings(&self, output: crate::Rect) -> Settings {
         Settings::for_output(output).spaced(self.config.spacing())

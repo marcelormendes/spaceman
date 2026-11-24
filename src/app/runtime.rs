@@ -152,7 +152,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// Rules apply to windows from now on; named workspaces and display assignments update.
     /// New named workspaces get their hotkeys at the next restart.
     pub(super) fn replace_config(&mut self, config: Config) {
-        config.configure_workspaces(&mut self.workspaces);
+        self.configure_workspaces_from(&config);
         self.config = config;
     }
 

@@ -294,8 +294,8 @@ normal recovery data.
 Edits saved in Spaceman Settings or in an external editor take effect automatically: rule changes,
 workspace display assignments, `settings.hud`, `settings.hud_style`,
 `settings.mouse_follows_focus`, `settings.gaps`, and
-`settings.single_window_max_width` reload without restarting (Settings › Layout retiles at once; an
-external edit applies on the next retile);
+`settings.single_window_max_width` reload without restarting (Settings › Rules, Workspaces, and
+Layout retile at once; an external edit applies on the next retile);
 `settings.update_channel` applies at the next update check. Global shortcuts for a
 newly added named workspace letter (`Option+A` ... `Option+Z`) register on the next app start:
 

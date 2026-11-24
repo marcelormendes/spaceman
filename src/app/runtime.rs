@@ -106,7 +106,7 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     pub(super) config: Config,
     /// Previous config from a reload whose rule changes have not yet been
     /// applied to open windows.
-    pub(super) pending_rule_reload: Option<Config>,
+    pub(super) pending_rule_reload: Option<cycle::PendingRuleReload>,
     pub(super) foreground_lanes: HashMap<String, DisplaySelector>,
     /// Global focus history across displays: the workspace focused now and the
     /// one focused before it. `Option+Tab` reads it, so it bounces between the
@@ -153,7 +153,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     pub(super) fn replace_config(&mut self, config: Config) {
         config.configure_workspaces(&mut self.workspaces);
         let previous = std::mem::replace(&mut self.config, config);
-        self.pending_rule_reload.get_or_insert(previous);
+        self.pending_rule_reload
+            .get_or_insert(cycle::PendingRuleReload::new(previous));
     }
 
     pub(super) fn execute(

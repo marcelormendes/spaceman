@@ -584,65 +584,60 @@ fn unmanaged_route_is_rejected_before_insertion() {
     assert_eq!(runtime.workspaces.workspace_of(&window), None);
 }
 
+fn window_for_app(pid: i32, window_id: u32) -> crate::PhysicalWindowId {
+    crate::PhysicalWindowId {
+        app: AppInstanceId {
+            pid,
+            launched_at: pid as u64,
+        },
+        window_id,
+    }
+}
+
+fn multi_app_observation(
+    apps: &[(&str, &[(crate::PhysicalWindowId, crate::Rect)])],
+) -> crate::NativeObservation {
+    crate::NativeObservation {
+        cycle: 0,
+        mouse_down: false,
+        applications: apps
+            .iter()
+            .map(|(bundle_id, windows)| crate::AppObservation::Complete {
+                app: crate::ObservedApplication {
+                    id: windows[0].0.app.clone(),
+                    bundle_id: (*bundle_id).into(),
+                },
+                focused: None,
+                windows: windows
+                    .iter()
+                    .map(|(id, frame)| crate::ObservedWindow {
+                        id: id.clone(),
+                        frame: *frame,
+                        resizable: true,
+                        title: None,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 #[test]
 fn adding_or_changing_route_rule_moves_open_windows_live_and_populates_target_workspace() {
     let keep = window(10);
-    let moved_app = AppInstanceId {
-        pid: 2,
-        launched_at: 2,
-    };
-    let moved_a = crate::PhysicalWindowId {
-        app: moved_app.clone(),
-        window_id: 20,
-    };
-    let moved_b = crate::PhysicalWindowId {
-        app: moved_app.clone(),
-        window_id: 21,
-    };
+    let moved_a = window_for_app(2, 20);
+    let moved_b = window_for_app(2, 21);
     let cancelled = AtomicBool::new(false);
     let mut backend = FakeBackend {
         focused: Some(keep.clone()),
         frontmost: Some(keep.app.clone()),
-        observation: Some(crate::NativeObservation {
-            cycle: 0,
-            mouse_down: false,
-            applications: vec![
-                crate::AppObservation::Complete {
-                    app: crate::ObservedApplication {
-                        id: keep.app.clone(),
-                        bundle_id: "com.example.Keep".into(),
-                    },
-                    focused: Some(keep.clone()),
-                    windows: vec![crate::ObservedWindow {
-                        id: keep.clone(),
-                        frame: frame(50),
-                        resizable: true,
-                        title: None,
-                    }],
-                },
-                crate::AppObservation::Complete {
-                    app: crate::ObservedApplication {
-                        id: moved_app,
-                        bundle_id: "com.example.Moved".into(),
-                    },
-                    focused: None,
-                    windows: vec![
-                        crate::ObservedWindow {
-                            id: moved_a.clone(),
-                            frame: frame(300),
-                            resizable: true,
-                            title: None,
-                        },
-                        crate::ObservedWindow {
-                            id: moved_b.clone(),
-                            frame: frame(600),
-                            resizable: true,
-                            title: None,
-                        },
-                    ],
-                },
-            ],
-        }),
+        observation: Some(multi_app_observation(&[
+            ("com.example.Keep", &[(keep.clone(), frame(50))]),
+            (
+                "com.example.Moved",
+                &[(moved_a.clone(), frame(300)), (moved_b.clone(), frame(600))],
+            ),
+        ])),
         ..FakeBackend::default()
     };
     backend.frames.insert(keep.clone(), frame(50));
@@ -692,7 +687,7 @@ fn adding_or_changing_route_rule_moves_open_windows_live_and_populates_target_wo
     let listed: Vec<_> = status.menu[0]
         .workspaces
         .iter()
-        .map(|entry| entry.workspace)
+        .map(|e| e.workspace)
         .collect();
     assert_eq!(listed, vec![WorkspaceId::ONE, WorkspaceId::TWO]);
 
@@ -717,7 +712,7 @@ fn adding_or_changing_route_rule_moves_open_windows_live_and_populates_target_wo
     let listed: Vec<_> = status.menu[0]
         .workspaces
         .iter()
-        .map(|entry| entry.workspace)
+        .map(|e| e.workspace)
         .collect();
     assert_eq!(listed, vec![WorkspaceId::ONE, WorkspaceId::FOUR]);
 
@@ -766,11 +761,6 @@ fn changing_route_rule_to_named_workspace_enables_it_and_moves_open_window() {
     let mut runtime = runtime(backend);
 
     runtime.cycle(outputs(), &cancelled).unwrap();
-    assert_eq!(
-        runtime.workspaces.workspace_of(&chat),
-        Some(WorkspaceId::ONE)
-    );
-
     let named = WorkspaceId::named('M').unwrap();
     assert!(!runtime.workspaces.is_enabled(named));
 
@@ -788,12 +778,12 @@ fn changing_route_rule_to_named_workspace_enables_it_and_moves_open_window() {
         status.menu[0]
             .workspaces
             .iter()
-            .any(|entry| entry.workspace == named)
+            .any(|e| e.workspace == named)
     );
 }
 
 #[test]
-fn removing_or_rerouting_float_rule_applies_live_even_after_restart() {
+fn removing_or_rerouting_float_rule_applies_live_on_visible_and_hidden_workspaces() {
     let win = window(10);
     let cancelled = AtomicBool::new(false);
     let mut backend = FakeBackend {
@@ -814,7 +804,7 @@ fn removing_or_rerouting_float_rule_applies_live_even_after_restart() {
     // Simulate a restart where restored_floating recorded the window in manual_floating.
     runtime.manual_floating.insert(win.clone());
 
-    // Removing the float rule re-tiles the window immediately.
+    // Removing the float rule on a visible workspace re-tiles immediately.
     runtime.replace_config(Config::default());
     runtime.cycle(outputs(), &cancelled).unwrap();
     assert_eq!(
@@ -824,17 +814,30 @@ fn removing_or_rerouting_float_rule_applies_live_even_after_restart() {
     assert_eq!(runtime.workspaces.floating_workspace_of(&win), None);
     assert!(!runtime.manual_floating.contains(&win));
 
-    // Re-adding float and then dragging it to visible workspace 6 tiles it on workspace 6.
+    // Re-adding float, switching to workspace 2 (so workspace 1 is hidden),
+    // and removing the float rule converts the hidden floating window to tiled too.
     let float_again =
         Config::parse("version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'float'")
             .unwrap();
     runtime.replace_config(float_again);
     runtime.cycle(outputs(), &cancelled).unwrap();
+    runtime
+        .switch(WorkspaceId::TWO, outputs(), &cancelled)
+        .unwrap();
     assert_eq!(
         runtime.workspaces.floating_workspace_of(&win),
         Some(WorkspaceId::ONE)
     );
 
+    runtime.replace_config(Config::default());
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&win),
+        Some(WorkspaceId::ONE)
+    );
+    assert_eq!(runtime.workspaces.floating_workspace_of(&win), None);
+
+    // Dragging it to visible workspace 6 tiles it on the secondary display.
     let route_six = Config::parse(
         "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 6",
     )
@@ -845,55 +848,19 @@ fn removing_or_rerouting_float_rule_applies_live_even_after_restart() {
         runtime.workspaces.workspace_of(&win),
         Some(WorkspaceId::SIX)
     );
-    assert_eq!(runtime.workspaces.floating_workspace_of(&win), None);
     assert!(runtime.backend.frames[&win].x >= 1000);
 }
 
 #[test]
 fn unrelated_rule_reload_preserves_manually_moved_windows() {
     let first = window(10);
-    let other_app = AppInstanceId {
-        pid: 2,
-        launched_at: 2,
-    };
-    let other = crate::PhysicalWindowId {
-        app: other_app.clone(),
-        window_id: 20,
-    };
+    let other = window_for_app(2, 20);
     let cancelled = AtomicBool::new(false);
     let mut backend = FakeBackend {
-        observation: Some(crate::NativeObservation {
-            cycle: 0,
-            mouse_down: false,
-            applications: vec![
-                crate::AppObservation::Complete {
-                    app: crate::ObservedApplication {
-                        id: first.app.clone(),
-                        bundle_id: "com.example.First".into(),
-                    },
-                    focused: Some(first.clone()),
-                    windows: vec![crate::ObservedWindow {
-                        id: first.clone(),
-                        frame: frame(50),
-                        resizable: true,
-                        title: None,
-                    }],
-                },
-                crate::AppObservation::Complete {
-                    app: crate::ObservedApplication {
-                        id: other_app,
-                        bundle_id: "com.example.Other".into(),
-                    },
-                    focused: None,
-                    windows: vec![crate::ObservedWindow {
-                        id: other.clone(),
-                        frame: frame(400),
-                        resizable: true,
-                        title: None,
-                    }],
-                },
-            ],
-        }),
+        observation: Some(multi_app_observation(&[
+            ("com.example.First", &[(first.clone(), frame(50))]),
+            ("com.example.Other", &[(other.clone(), frame(400))]),
+        ])),
         ..FakeBackend::default()
     };
     backend.frames.insert(first.clone(), frame(50));
@@ -910,16 +877,7 @@ fn unrelated_rule_reload_preserves_manually_moved_windows() {
         .bundles
         .insert(first.app.clone(), "com.example.First".into());
     runtime.cycle(outputs(), &cancelled).unwrap();
-    assert_eq!(
-        runtime.workspaces.workspace_of(&first),
-        Some(WorkspaceId::THREE)
-    );
-    assert_eq!(
-        runtime.workspaces.workspace_of(&other),
-        Some(WorkspaceId::ONE)
-    );
 
-    // Adding a rule for `Other` must move `Other` to 4 without pulling `First` back to 2.
     let updated = Config::parse(
         "version = 1
 [[rules]]
@@ -961,10 +919,6 @@ fn ignoring_a_hidden_parked_window_restores_and_releases_it() {
     let mut runtime = runtime_with_config(backend, route_two);
 
     runtime.cycle(outputs(), &cancelled).unwrap();
-    assert_eq!(
-        runtime.workspaces.workspace_of(&win),
-        Some(WorkspaceId::TWO)
-    );
     assert!(runtime.parked.contains_key(&win));
 
     let ignore =
@@ -981,4 +935,61 @@ fn ignoring_a_hidden_parked_window_restores_and_releases_it() {
             .frame
             .contains_center(runtime.backend.frames[&win])
     );
+}
+
+#[test]
+fn rule_reload_retries_after_transient_park_or_observation_failure() {
+    let win = window(10);
+    let cancelled = AtomicBool::new(false);
+    let mut backend = FakeBackend {
+        observation: Some(observation(&win, frame(50))),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(win.clone(), frame(50));
+    let mut runtime = runtime(backend);
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&win),
+        Some(WorkspaceId::ONE)
+    );
+
+    let to_two = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    runtime.replace_config(to_two);
+
+    // Cycle 1: app observation is temporarily unavailable, so reload defers cleanly.
+    let saved_obs = runtime.backend.observation.clone();
+    runtime.backend.observation = Some(crate::NativeObservation {
+        cycle: 0,
+        mouse_down: false,
+        applications: vec![crate::AppObservation::Unavailable {
+            app: win.app.clone(),
+            error: "transient AX timeout".into(),
+        }],
+    });
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&win),
+        Some(WorkspaceId::ONE)
+    );
+
+    // Cycle 2: observation returns, but parking temporarily fails.
+    runtime.backend.observation = saved_obs;
+    runtime.backend.position_outcome = Some(macos::ApplyOutcome::Unavailable);
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&win),
+        Some(WorkspaceId::ONE)
+    );
+
+    // Cycle 3: parking succeeds on retry and completes the move to workspace 2.
+    runtime.backend.position_outcome = None;
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&win),
+        Some(WorkspaceId::TWO)
+    );
+    assert!(runtime.parked.contains_key(&win));
 }

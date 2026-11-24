@@ -181,9 +181,10 @@ on the same letter.
 - Unit (FakeBackend), `src/app/tests/rules.rs`: live rule reloads
   (`adding_or_changing_route_rule_moves_open_windows_live_and_populates_target_workspace`,
   `changing_route_rule_to_named_workspace_enables_it_and_moves_open_window`,
-  `removing_or_rerouting_float_rule_applies_live_even_after_restart`,
+  `removing_or_rerouting_float_rule_applies_live_on_visible_and_hidden_workspaces`,
   `unrelated_rule_reload_preserves_manually_moved_windows`,
-  `ignoring_a_hidden_parked_window_restores_and_releases_it`).
+  `ignoring_a_hidden_parked_window_restores_and_releases_it`,
+  `rule_reload_retries_after_transient_park_or_observation_failure`).
 - Unit (FakeBackend), `src/app/tests/reconciliation.rs`: adoption order
   (`bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace`,
   `title_route_rule_routes_matching_secondary_window`,
@@ -243,7 +244,7 @@ on the same letter.
   logs `hotkey: <name> pressed but macOS did not deliver it`, registers every shortcut again (at
   most every 5 s) and runs the missed action. Each delivered press logs `hotkey: <name>`.
 - Config edits (rules, display assignments, named-workspace shortcuts, and HUD settings) reload
-  automatically without restarting; Settings › Rules, Workspaces, and Layout retile immediately, and
+  automatically without restarting; Settings › Rules and Layout retile immediately, and
   `ctl restart` exits without relaunching.
 - The HUD's first appearance after launch only fades in: its panel has drawn nothing yet for the
   capsule to rise from. Every later one enters with the full motion.

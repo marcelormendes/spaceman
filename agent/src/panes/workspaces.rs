@@ -184,7 +184,7 @@ fn monitor_row(p: Paint, choices: &[Choice], workspace: WorkspaceId, effective: 
                 return;
             };
             let monitor = override_for(workspace, chosen);
-            ui.edit_and_retile(|doc| doc.set_monitor(workspace, monitor.as_deref()));
+            ui.edit(|doc| doc.set_monitor(workspace, monitor.as_deref()));
         })
         .build(p.k)
         .key("monitor");

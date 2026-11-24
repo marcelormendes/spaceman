@@ -57,16 +57,9 @@ impl MainThreadAgent {
     /// Registers global shortcuts for any newly configured named workspaces
     /// without requiring an app restart.
     pub(super) fn refresh_hotkey_workspaces(&mut self, named: &[(WorkspaceId, DisplaySelector)]) {
-        let mut next = self.hotkey_workspaces.clone();
-        for (workspace, selector) in named {
-            if self.scope.manages_selector(selector) && !next.contains(workspace) {
-                next.push(*workspace);
-            }
-        }
-        next.sort();
-        if next == self.hotkey_workspaces {
+        let Some(next) = merge_hotkey_workspaces(&self.hotkey_workspaces, named, self.scope) else {
             return;
-        }
+        };
         self.hotkey_workspaces = next;
         if self.hotkeys.is_some() {
             match HotkeyPlan::current(&self.hotkey_workspaces) {
@@ -100,5 +93,52 @@ impl MainThreadAgent {
     fn hotkey_binding(&self, id: u32) -> Option<(WorkerAction, String)> {
         let (action, description) = self.hotkeys.as_ref()?.binding(id)?;
         Some((action.clone(), description.to_owned()))
+    }
+}
+
+fn merge_hotkey_workspaces(
+    current: &[WorkspaceId],
+    named: &[(WorkspaceId, DisplaySelector)],
+    scope: ManagementScope,
+) -> Option<Vec<WorkspaceId>> {
+    let mut next = current.to_vec();
+    for (workspace, selector) in named {
+        if scope.manages_selector(selector) && !next.contains(workspace) {
+            next.push(*workspace);
+        }
+    }
+    next.sort();
+    (next != current).then_some(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merges_new_managed_named_workspaces_and_skips_unmanaged_or_existing() {
+        let base: Vec<_> = WorkspaceId::numbered().collect();
+        let named_m = WorkspaceId::named('M').unwrap();
+        let named_s = WorkspaceId::named('S').unwrap();
+
+        let merged = merge_hotkey_workspaces(
+            &base,
+            &[
+                (named_m, DisplaySelector::Main),
+                (named_s, DisplaySelector::Secondary),
+            ],
+            ManagementScope::Main,
+        )
+        .expect("new managed named workspace should update list");
+        assert!(merged.contains(&named_m));
+        assert!(!merged.contains(&named_s));
+        assert_eq!(
+            merge_hotkey_workspaces(
+                &merged,
+                &[(named_m, DisplaySelector::Main)],
+                ManagementScope::Main
+            ),
+            None
+        );
     }
 }

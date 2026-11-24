@@ -183,9 +183,8 @@ Edits saved in Spaceman Settings or in an external editor take effect automatica
 restarting: rule changes move, float, tile, or release matching open windows right away; workspace
 display assignments, newly referenced named workspace shortcuts (`Option+A` ... `Option+Z`),
 `settings.hud`, `settings.hud_style`, `settings.gaps`, and `settings.single_window_max_width` reload
-live (Settings › Rules, Workspaces, and Layout retile at once; external edits apply on the next
-retile); `settings.update_channel` applies at the next update check. If you ever want a clean
-restart:
+live (Settings › Rules and Layout retile at once; external edits apply on the next retile);
+`settings.update_channel` applies at the next update check. If you ever want a clean restart:
 
 ```sh
 spaceman ctl pause

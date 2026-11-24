@@ -4,7 +4,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::{config::Config, login_item, shortcuts::Shortcuts};
+use crate::{
+    DisplaySelector, WorkspaceId, config::Config, login_item, shortcuts::Shortcuts,
+    workspace::Workspaces,
+};
 
 /// How long a Launch at Login reading stays fresh. Each reading is an XPC round
 /// trip to `smd`; Spaceman's own toggle reports its result directly, so the
@@ -25,6 +28,9 @@ pub(super) struct Probe {
     pub(super) hud: Option<bool>,
     /// `[shortcuts]` read for `config_stamp`, when that config loaded.
     pub(super) shortcuts: Option<Shortcuts>,
+    /// Enabled workspaces and their display selectors for `config_stamp`, when
+    /// that config loaded.
+    pub(super) workspaces: Option<Vec<(WorkspaceId, DisplaySelector)>>,
 }
 
 /// What the probe reads from a `config.toml` that loads.
@@ -32,13 +38,23 @@ pub(super) struct Probe {
 pub(super) struct ConfigRead {
     pub(super) hud: bool,
     pub(super) shortcuts: Shortcuts,
+    pub(super) workspaces: Vec<(WorkspaceId, DisplaySelector)>,
 }
 
 impl ConfigRead {
     fn load() -> Option<Self> {
-        Config::load().ok().map(|config| Self {
-            hud: config.hud(),
-            shortcuts: config.shortcuts().clone(),
+        Config::load().ok().map(|config| {
+            let mut configured = Workspaces::default();
+            config.configure_workspaces(&mut configured);
+            let workspaces = WorkspaceId::all()
+                .filter(|workspace| configured.is_enabled(*workspace))
+                .map(|workspace| (workspace, configured.assignment(workspace).clone()))
+                .collect();
+            Self {
+                hud: config.hud(),
+                shortcuts: config.shortcuts().clone(),
+                workspaces,
+            }
         })
     }
 }
@@ -81,6 +97,7 @@ impl ProbeState {
         };
         let hud = read.as_ref().map(|read| read.hud);
         let shortcuts = read.as_ref().map(|read| read.shortcuts.clone());
+        let workspaces = read.as_ref().map(|read| read.workspaces.clone());
         self.config = Some((config_stamp, read));
         let login_due = forced
             || self.login.as_ref().is_none_or(|(read_at, _)| {
@@ -100,6 +117,7 @@ impl ProbeState {
             config_stamp,
             hud,
             shortcuts,
+            workspaces,
         })
     }
 }
@@ -227,23 +245,32 @@ mod tests {
             login_item::Status::Disabled,
         );
         let stamp = Some(SystemTime::UNIX_EPOCH);
+        let named = vec![(WorkspaceId::named('M').unwrap(), DisplaySelector::Main)];
         let probe = state.next(
             start,
             false,
             stamp,
-            || Some(read(false)),
+            || {
+                Some(ConfigRead {
+                    hud: false,
+                    shortcuts: Shortcuts::default(),
+                    workspaces: named.clone(),
+                })
+            },
             || unreachable!("login status is still fresh"),
         );
         let probe = probe.expect("config changed");
         assert_eq!(probe.launch_at_login, None);
         assert_eq!(probe.hud, Some(false));
         assert_eq!(probe.shortcuts, Some(Shortcuts::default()));
+        assert_eq!(probe.workspaces, Some(named));
     }
 
     fn read(hud: bool) -> ConfigRead {
         ConfigRead {
             hud,
             shortcuts: Shortcuts::default(),
+            workspaces: Vec::new(),
         }
     }
 }

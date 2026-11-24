@@ -179,10 +179,10 @@ the same chord, an unknown modifier, key, or command, or a chord without `alt`, 
 config error. A binding whose workspace is not enabled, or that the keyboard layout cannot type, is
 skipped and logged in `agent.log` while the other shortcuts register.
 
-Shortcut changes apply live: saving `config.toml` registers the new chords within a couple of
-seconds, without a restart. If the new table can't be registered, the previous shortcuts keep working
-and Settings shows `Shortcuts not applied` with the reason. Workspaces enabled by a config edit still
-get their shortcuts on the next start. The menu-bar workspace list keeps showing the built-in
+Shortcut changes apply live: saving `config.toml` registers the new chords (including added or
+removed empty named workspace letters) within a couple of seconds, without a restart. If the new
+table can't be registered, the previous shortcuts keep working and Settings shows `Shortcuts not
+applied` with the reason. The menu-bar workspace list keeps showing the built-in
 `Option`+number/letter hints next to each workspace.
 
 Settings › Shortcuts edits the same table. Click a shortcut's keys and press a new chord: it is saved
@@ -292,12 +292,12 @@ normal recovery data.
 ## Applying Changes
 
 Edits saved in Spaceman Settings or in an external editor take effect automatically: rule changes,
-workspace display assignments, `settings.hud`, `settings.hud_style`,
+workspace display assignments, named workspace shortcuts (`Option+A` ... `Option+Z`, registering
+added letters and unregistering removed empty ones), `settings.hud`, `settings.hud_style`,
 `settings.mouse_follows_focus`, `settings.gaps`, and
 `settings.single_window_max_width` reload without restarting (Settings › Layout retiles at once; an
 external edit applies on the next retile);
-`settings.update_channel` applies at the next update check. Global shortcuts for a
-newly added named workspace letter (`Option+A` ... `Option+Z`) register on the next app start:
+`settings.update_channel` applies at the next update check. If you ever want a clean restart:
 
 ```sh
 spaceman ctl pause

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DisplaySelector, ObservedWindow, WorkspaceId, Workspaces,
+    shortcuts::{RawShortcuts, Shortcuts},
     spacing::{Spacing, SpacingKey},
 };
 
@@ -12,6 +13,7 @@ struct AppSettings {
     hud: bool,
     hud_style: HudStyle,
     update_channel: UpdateChannel,
+    mouse_follows_focus: MouseFollowsFocus,
     spacing: Spacing,
 }
 
@@ -21,6 +23,7 @@ impl Default for AppSettings {
             hud: true,
             hud_style: HudStyle::default(),
             update_channel: UpdateChannel::default(),
+            mouse_follows_focus: MouseFollowsFocus::default(),
             spacing: Spacing::default(),
         }
     }
@@ -56,6 +59,41 @@ impl UpdateChannel {
     }
 }
 
+/// Whether Spaceman moves the pointer when an explicit focus action lands elsewhere:
+/// `settings.mouse_follows_focus`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseFollowsFocus {
+    /// Leave the pointer where it is.
+    #[default]
+    Off,
+    /// Move the pointer to the focused window (or empty display) when it is on another display.
+    Display,
+    /// Move the pointer to the focused window (or empty display) whenever it is outside it.
+    Window,
+}
+
+impl MouseFollowsFocus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Display => "display",
+            Self::Window => "window",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "display" => Some(Self::Display),
+            "window" => Some(Self::Window),
+            _ => None,
+        }
+    }
+}
+
 /// How the Workspace HUD draws each workspace in its row: `settings.hud_style`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -86,11 +124,23 @@ impl HudStyle {
     }
 }
 
+/// The `[labs]` table: experimental features, each behind its own switch and off by default.
+/// With every switch off Spaceman behaves exactly as if Labs did not exist.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabsConfig {
+    /// The i3/sway-style Scratchpad ([`crate::scratchpad`]) and its `⌥\` / `⌥⇧\` shortcuts.
+    #[serde(default)]
+    pub scratchpad: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     settings: AppSettings,
+    labs: LabsConfig,
     rules: Vec<WindowRule>,
     workspace_monitors: Vec<(WorkspaceId, DisplaySelector)>,
+    shortcuts: Shortcuts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,9 +172,13 @@ struct RawConfig {
     #[serde(default)]
     settings: RawSettings,
     #[serde(default)]
+    labs: LabsConfig,
+    #[serde(default)]
     rules: Vec<RawWindowRule>,
     #[serde(default)]
     workspaces: Vec<RawWorkspace>,
+    #[serde(default)]
+    shortcuts: RawShortcuts,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +191,8 @@ struct RawSettings {
     #[serde(default)]
     update_channel: UpdateChannel,
     #[serde(default)]
+    mouse_follows_focus: MouseFollowsFocus,
+    #[serde(default)]
     single_window_max_width: i64,
     #[serde(default)]
     gaps: RawGaps,
@@ -148,6 +204,7 @@ impl Default for RawSettings {
             hud: true,
             hud_style: HudStyle::default(),
             update_channel: UpdateChannel::default(),
+            mouse_follows_focus: MouseFollowsFocus::default(),
             single_window_max_width: 0,
             gaps: RawGaps::default(),
         }
@@ -261,16 +318,33 @@ impl Config {
             }
             workspace_monitors.push((id, DisplaySelector::parse(&workspace.monitor)));
         }
+        let mut shortcuts = raw.shortcuts.parse()?;
+        shortcuts.scratchpad = raw.labs.scratchpad;
         Ok(Self {
             settings: AppSettings {
                 hud: raw.settings.hud,
                 hud_style: raw.settings.hud_style,
                 update_channel: raw.settings.update_channel,
+                mouse_follows_focus: raw.settings.mouse_follows_focus,
                 spacing: raw.settings.spacing()?,
             },
+            labs: raw.labs,
             rules,
             workspace_monitors,
+            shortcuts,
         })
+    }
+
+    /// The `[shortcuts]` table: user bindings and whether built-in shortcuts stay.
+    #[must_use]
+    pub const fn shortcuts(&self) -> &Shortcuts {
+        &self.shortcuts
+    }
+
+    /// The `[labs]` switches: experimental features, all off by default.
+    #[must_use]
+    pub const fn labs(&self) -> LabsConfig {
+        self.labs
     }
 
     #[must_use]
@@ -286,6 +360,11 @@ impl Config {
     #[must_use]
     pub const fn update_channel(&self) -> UpdateChannel {
         self.settings.update_channel
+    }
+
+    #[must_use]
+    pub const fn mouse_follows_focus(&self) -> MouseFollowsFocus {
+        self.settings.mouse_follows_focus
     }
 
     /// Gaps between tiles, outer screen padding and the lone-window width cap.
@@ -481,10 +560,17 @@ struct EditableConfig {
     version: u32,
     #[serde(default, skip_serializing_if = "EditableSettings::is_empty")]
     settings: EditableSettings,
+    /// Carried through untouched; editing a workspace never changes a Lab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    labs: Option<toml::Table>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rules: Vec<EditableRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     workspaces: Vec<EditableWorkspace>,
+    /// Carried through untouched; this editor never changes shortcuts (Settings › Shortcuts
+    /// edits them in place with `toml_edit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shortcuts: Option<toml::Table>,
 }
 
 impl Default for EditableConfig {
@@ -492,8 +578,10 @@ impl Default for EditableConfig {
         Self {
             version: 1,
             settings: EditableSettings::default(),
+            labs: None,
             rules: Vec::new(),
             workspaces: Vec::new(),
+            shortcuts: None,
         }
     }
 }
@@ -508,6 +596,8 @@ struct EditableSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     update_channel: Option<UpdateChannel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    mouse_follows_focus: Option<MouseFollowsFocus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     single_window_max_width: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gaps: Option<toml::Table>,
@@ -518,6 +608,7 @@ impl EditableSettings {
         self.hud.is_none()
             && self.hud_style.is_none()
             && self.update_channel.is_none()
+            && self.mouse_follows_focus.is_none()
             && self.single_window_max_width.is_none()
             && self.gaps.is_none()
     }
@@ -542,6 +633,83 @@ struct EditableWorkspace {
     monitor: String,
 }
 
+/// Exclusive advisory lock guarding read-modify-write updates to a config file.
+///
+/// Locks the resolved target's parent directory via `flock(2)` so atomic renames
+/// of the config file never swap the locked inode and no sidecar lock file is
+/// left behind (for example inside a dotfiles repository).
+pub struct ConfigLock {
+    _dir: std::fs::File,
+}
+
+/// Resolves symbolic links at `path` so config locking and atomic saves operate
+/// on the target file instead of replacing the symbolic link itself.
+pub fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
+    const MAX_SYMLINK_DEPTH: usize = 40;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_symlink() => return Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(path.to_path_buf());
+        }
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => return Ok(resolved),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current)?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    let parent = current
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."));
+                    let base =
+                        std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                    base.join(target)
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "too many levels of symbolic links while resolving {}",
+            path.display()
+        ),
+    ))
+}
+
+/// Acquires an exclusive advisory lock for editing the config file at `path`.
+pub fn lock_config(path: &Path) -> std::io::Result<ConfigLock> {
+    let target = resolve_write_target(path)?;
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let dir = std::fs::File::open(parent)?;
+    dir.lock()?;
+    Ok(ConfigLock { _dir: dir })
+}
+
+/// Atomically replaces the config file at `path`, following symbolic links so a
+/// symlinked `config.toml` stays linked to its updated target.
+pub fn write_config_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let target = resolve_write_target(path)?;
+    crate::state_file::write_atomic(&target, bytes)
+}
+
 /// Atomically updates `workspace`'s display assignment in `path`, clearing the
 /// `[[workspaces]]` override when it returns to the built-in default (while
 /// keeping named workspaces that have no route rule declared).
@@ -550,6 +718,8 @@ pub fn save_workspace_monitor_at(
     workspace: WorkspaceId,
     selector: &DisplaySelector,
 ) -> Result<Config, String> {
+    let _lock =
+        lock_config(path).map_err(|error| format!("failed to lock {}: {error}", path.display()))?;
     let mut doc = match std::fs::read_to_string(path) {
         Ok(source) => {
             parse_path(path, &source)?;
@@ -584,7 +754,7 @@ pub fn save_workspace_monitor_at(
         .map_err(|error| format!("failed to format config.toml: {error}"))?;
     let parsed = Config::parse(&rendered)
         .map_err(|error| format!("refusing to write invalid config.toml: {error}"))?;
-    crate::state_file::write_atomic(path, rendered.as_bytes())
+    write_config_atomic(path, rendered.as_bytes())
         .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     Ok(parsed)
 }
@@ -736,6 +906,43 @@ monitor = "main"
     }
 
     #[test]
+    fn parses_labs_with_the_scratchpad_off_by_default() {
+        for source in ["version = 1", "version = 1\n[labs]\n"] {
+            let config = Config::parse(source).unwrap();
+            assert!(!config.labs().scratchpad);
+            assert!(!config.shortcuts().scratchpad);
+        }
+        assert!(!Config::default().labs().scratchpad);
+        let config = Config::parse("version = 1\n[labs]\nscratchpad = true\n").unwrap();
+        assert!(config.labs().scratchpad);
+        assert!(
+            config.shortcuts().scratchpad,
+            "the Lab's shortcuts follow its switch"
+        );
+        assert!(Config::parse("version = 1\n[labs]\nwarp_drive = true\n").is_err());
+        assert!(Config::parse("version = 1\n[labs]\nscratchpad = 1\n").is_err());
+    }
+
+    #[test]
+    fn saving_a_workspace_monitor_keeps_the_labs_table() {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceman-labs-{}-{}",
+            std::process::id(),
+            now().as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "version = 1\n[labs]\nscratchpad = true\n").unwrap();
+
+        let saved = save_workspace_monitor_at(&path, WorkspaceId::ONE, &DisplaySelector::Secondary)
+            .unwrap();
+
+        assert!(saved.labs().scratchpad);
+        assert!(load_path(&path).unwrap().labs().scratchpad);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn parses_update_channel_with_stable_default() {
         assert_eq!(Config::default().update_channel(), UpdateChannel::Stable);
         assert_eq!(
@@ -751,6 +958,55 @@ monitor = "main"
             assert_eq!(UpdateChannel::parse(channel.as_str()), Some(channel));
         }
         assert!(Config::parse("version = 1\n[settings]\nupdate_channel = \"beta\"\n").is_err());
+    }
+
+    #[test]
+    fn parses_mouse_follows_focus_with_off_default() {
+        assert_eq!(
+            Config::default().mouse_follows_focus(),
+            MouseFollowsFocus::Off
+        );
+        assert_eq!(
+            Config::parse("version = 1").unwrap().mouse_follows_focus(),
+            MouseFollowsFocus::Off
+        );
+        for mode in [
+            MouseFollowsFocus::Off,
+            MouseFollowsFocus::Display,
+            MouseFollowsFocus::Window,
+        ] {
+            let source = format!(
+                "version = 1\n[settings]\nmouse_follows_focus = {:?}\n",
+                mode.as_str()
+            );
+            assert_eq!(Config::parse(&source).unwrap().mouse_follows_focus(), mode);
+            assert_eq!(MouseFollowsFocus::parse(mode.as_str()), Some(mode));
+        }
+        assert!(
+            Config::parse("version = 1\n[settings]\nmouse_follows_focus = \"monitor\"\n").is_err()
+        );
+        assert!(Config::parse("version = 1\n[settings]\nmouse_follows_focus = true\n").is_err());
+        assert_eq!(MouseFollowsFocus::parse("Display"), None);
+    }
+
+    #[test]
+    fn saving_a_workspace_monitor_keeps_mouse_follows_focus() {
+        let dir = std::env::temp_dir().join(format!(
+            "spaceman-config-mff-{}-{}",
+            std::process::id(),
+            now().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "version = 1\n[settings]\nmouse_follows_focus = \"display\"\n",
+        )
+        .unwrap();
+        let saved = save_workspace_monitor_at(&path, WorkspaceId::TWO, &DisplaySelector::Secondary)
+            .unwrap();
+        assert_eq!(saved.mouse_follows_focus(), MouseFollowsFocus::Display);
+        drop(std::fs::remove_dir_all(dir));
     }
 
     #[test]
@@ -788,6 +1044,34 @@ monitor = "main"
         assert_eq!(kept.named_workspaces().collect::<Vec<_>>(), vec![named]);
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("workspace = \"D\""), "{written}");
+
+        drop(std::fs::remove_dir_all(dir));
+    }
+
+    #[test]
+    fn save_workspace_monitor_preserves_symlink_target_without_sidecar_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "spaceman-config-symlink-{}-{}",
+            std::process::id(),
+            now().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("dotfiles.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&target, "version = 1\n").unwrap();
+        std::os::unix::fs::symlink("dotfiles.toml", &link).unwrap();
+
+        save_workspace_monitor_at(&link, WorkspaceId::TWO, &DisplaySelector::Secondary).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert!(written.contains("monitor = \"secondary\""), "{written}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
 
         drop(std::fs::remove_dir_all(dir));
     }
@@ -887,5 +1171,74 @@ right = 128
         assert_eq!(saved.spacing().left, 20);
         assert_eq!(saved.spacing().single_window_max_width, 1440);
         drop(std::fs::remove_dir_all(dir));
+    }
+
+    #[test]
+    fn saving_a_workspace_monitor_keeps_shortcuts() {
+        let dir = std::env::temp_dir().join(format!(
+            "spaceman-config-shortcuts-{}-{}",
+            std::process::id(),
+            now().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "version = 1\n[shortcuts]\ndefaults = false\n[shortcuts.bindings]\n\"alt+left\" = \"move-direction left\"\n",
+        )
+        .unwrap();
+        let saved = save_workspace_monitor_at(&path, WorkspaceId::TWO, &DisplaySelector::Secondary)
+            .unwrap();
+        assert!(!saved.shortcuts().defaults);
+        assert_eq!(saved.shortcuts().bindings.len(), 1);
+        drop(std::fs::remove_dir_all(dir));
+    }
+
+    #[test]
+    fn shortcuts_default_to_built_ins_and_reject_bad_bindings() {
+        assert_eq!(
+            Config::parse("version = 1").unwrap().shortcuts(),
+            &crate::shortcuts::Shortcuts::default()
+        );
+        for (source, message) in [
+            (
+                "[shortcuts.bindings]\n\"super+q\" = \"float\"",
+                "unknown modifier",
+            ),
+            (
+                "[shortcuts.bindings]\n\"alt+q\" = \"close\"",
+                "unknown command",
+            ),
+            (
+                "[shortcuts]\ndefaults = false",
+                "needs at least one binding",
+            ),
+            ("[shortcuts]\nmode = \"replace\"", "unknown field"),
+        ] {
+            let error = Config::parse(&format!("version = 1\n{source}")).unwrap_err();
+            assert!(error.contains(message), "{source}: {error}");
+        }
+    }
+
+    /// A global shortcut fires in every app, so a chord without cmd, ctrl, or alt would eat
+    /// ordinary typing. Unbinding is the only exception, and it never registers a chord.
+    #[test]
+    fn shortcuts_never_bind_a_plain_or_shift_only_key() {
+        for chord in [
+            "\"h\"",
+            "\"shift+h\"",
+            "\"shift+left\"",
+            "\"shift+/\"",
+            "\"shift+1\"",
+            "\"space\"",
+        ] {
+            let source = format!("version = 1\n[shortcuts.bindings]\n{chord} = \"float\"");
+            let error = Config::parse(&source).unwrap_err();
+            assert!(
+                error.contains("needs at least one of alt, cmd, or ctrl"),
+                "{chord}: {error}"
+            );
+        }
+        assert!(Config::parse("version = 1\n[shortcuts.bindings]\n\"alt+h\" = \"none\"").is_ok());
     }
 }

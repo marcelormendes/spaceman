@@ -189,7 +189,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         index
                             .windows
                             .insert(window.id.clone(), (app.bundle_id.clone(), window.clone()));
-                        if self.workspaces.workspace_of_any(&window.id).is_none() {
+                        if self.workspaces.workspace_of_any(&window.id).is_none()
+                            && !self.scratchpad.contains(&window.id)
+                        {
                             index.unowned.push((app.bundle_id.clone(), window.clone()));
                         }
                     }
@@ -221,6 +223,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .collect();
         floating.sort_by_key(|(window, workspace)| (*workspace, window.app.pid, window.window_id));
         for (window, source) in floating {
+            if self.scratchpad.contains(&window) {
+                continue;
+            }
             owned.push(OwnedWindow {
                 window,
                 source,
@@ -528,7 +533,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         pass: &mut ReloadPass<'_>,
     ) {
         for (bundle_id, window) in unowned {
-            if !pending.includes(&window.id) {
+            if !pending.includes(&window.id) || self.scratchpad.contains(&window.id) {
                 continue;
             }
             let old_disp = pending

@@ -44,36 +44,13 @@ impl MainThreadAgent {
                 "hotkey: {description} pressed but macOS did not deliver it; registering shortcuts again"
             );
             self.last_hotkey_heal = Some(Instant::now());
-            match HotkeyPlan::current(&self.hotkey_workspaces) {
+            match HotkeyPlan::current(&self.hotkey_workspaces, &self.shortcuts) {
                 Ok(plan) => self.reinstall_hotkeys(plan),
                 Err(error) => log_event!("hotkeys: could not plan shortcuts: {error}"),
             }
         }
         if self.automatic {
             self.queue_worker_input(QueuedInput::Action(action));
-        }
-    }
-
-    /// Rebuilds global workspace shortcuts when `config.toml` adds, removes, or
-    /// reassigns workspaces, without requiring an app restart.
-    pub(super) fn refresh_hotkey_workspaces(
-        &mut self,
-        configured: &[(WorkspaceId, DisplaySelector)],
-    ) {
-        let Some(next) = rebuild_hotkey_workspaces(
-            &self.hotkey_workspaces,
-            configured,
-            &self.occupied_named_workspaces,
-            self.scope,
-        ) else {
-            return;
-        };
-        self.hotkey_workspaces = next;
-        if self.hotkeys.is_some() {
-            match HotkeyPlan::current(&self.hotkey_workspaces) {
-                Ok(plan) => self.reinstall_hotkeys(plan),
-                Err(error) => log_event!("hotkeys: could not plan shortcuts: {error}"),
-            }
         }
     }
 
@@ -84,6 +61,9 @@ impl MainThreadAgent {
         match Hotkeys::install(self.actions_sender.clone(), plan) {
             Ok(hotkeys) => {
                 log_event!("hotkeys: registered {} shortcuts", hotkeys.len());
+                for skipped in hotkeys.skipped() {
+                    log_event!("hotkeys: {skipped}");
+                }
                 self.hotkeys = Some(hotkeys);
                 self.last_error = None;
                 self.ui_dirty = true;
@@ -101,87 +81,5 @@ impl MainThreadAgent {
     fn hotkey_binding(&self, id: u32) -> Option<(WorkerAction, String)> {
         let (action, description) = self.hotkeys.as_ref()?.binding(id)?;
         Some((action.clone(), description.to_owned()))
-    }
-}
-
-fn rebuild_hotkey_workspaces(
-    current: &[WorkspaceId],
-    configured: &[(WorkspaceId, DisplaySelector)],
-    occupied_named: &[WorkspaceId],
-    scope: ManagementScope,
-) -> Option<Vec<WorkspaceId>> {
-    let mut next: Vec<_> = configured
-        .iter()
-        .filter(|(_, selector)| scope.manages_selector(selector))
-        .map(|(workspace, _)| *workspace)
-        .collect();
-    for workspace in occupied_named {
-        let selector = configured
-            .iter()
-            .find(|(id, _)| id == workspace)
-            .map_or_else(
-                || Workspaces::default_assignment(*workspace),
-                |(_, selector)| selector.clone(),
-            );
-        if workspace.letter().is_some()
-            && scope.manages_selector(&selector)
-            && !next.contains(workspace)
-        {
-            next.push(*workspace);
-        }
-    }
-    next.sort();
-    next.dedup();
-    let mut existing = current.to_vec();
-    existing.sort();
-    existing.dedup();
-    (next != existing).then_some(next)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn numbered_with_defaults() -> Vec<(WorkspaceId, DisplaySelector)> {
-        WorkspaceId::numbered()
-            .map(|workspace| (workspace, Workspaces::default_assignment(workspace)))
-            .collect()
-    }
-
-    #[test]
-    fn rebuilds_named_workspace_shortcuts_symmetrically_and_keeps_occupied_ones() {
-        let mut base: Vec<_> = WorkspaceId::numbered().take(5).collect();
-        let named_m = WorkspaceId::named('M').unwrap();
-        let named_s = WorkspaceId::named('S').unwrap();
-
-        let mut configured = numbered_with_defaults();
-        configured.push((named_m, DisplaySelector::Main));
-        configured.push((named_s, DisplaySelector::Secondary));
-
-        let added = rebuild_hotkey_workspaces(&base, &configured, &[], ManagementScope::Main)
-            .expect("new managed named workspace should register");
-        assert!(added.contains(&named_m));
-        assert!(!added.contains(&named_s));
-
-        // Unsorted current list with the same membership must not trigger a reinstall.
-        let mut unsorted = added.clone();
-        unsorted.reverse();
-        assert_eq!(
-            rebuild_hotkey_workspaces(&unsorted, &configured, &[], ManagementScope::Main),
-            None
-        );
-
-        // Removing M while it still holds windows keeps M registered.
-        let without_m = numbered_with_defaults();
-        assert_eq!(
-            rebuild_hotkey_workspaces(&added, &without_m, &[named_m], ManagementScope::Main),
-            None
-        );
-
-        // Once M is empty and removed from config, its shortcut unregisters live.
-        let removed = rebuild_hotkey_workspaces(&added, &without_m, &[], ManagementScope::Main)
-            .expect("removed empty named workspace should unregister");
-        base.sort();
-        assert_eq!(removed, base);
     }
 }

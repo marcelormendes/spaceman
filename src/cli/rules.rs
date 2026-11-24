@@ -54,7 +54,13 @@ pub(crate) fn run(executable: &str, args: &[&str], path_override: Option<&Path>)
     let Some((&sub, rest)) = args.split_first() else {
         return Outcome::usage(help::rules_help(executable));
     };
-    if help::is_help_flag(sub) || sub == "help" || rest.iter().any(|arg| help::is_help_flag(arg)) {
+    if help::is_help_flag(sub)
+        || sub == "help"
+        || match sub {
+            "add" => add_requests_help(rest),
+            _ => rest.iter().any(|arg| help::is_help_flag(arg)),
+        }
+    {
         return Outcome::ok(help::rules_help(executable));
     }
 
@@ -103,6 +109,25 @@ fn run_list(args: &[&str], path_override: Option<&Path>) -> Result<String, Strin
         .map(|(index, rule)| format!("{}. {}", index + 1, format_rule_summary(rule)))
         .collect::<Vec<_>>();
     Ok(lines.join("\n"))
+}
+
+fn add_requests_help(args: &[&str]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index];
+        if help::is_help_flag(arg) {
+            return true;
+        }
+        if matches!(
+            arg,
+            "--app" | "--bundle-id" | "--title" | "--workspace" | "--position"
+        ) {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    false
 }
 
 fn parse_add_options(args: &[&str]) -> Result<AddOptions, String> {
@@ -221,21 +246,6 @@ fn parse_add_options(args: &[&str]) -> Result<AddOptions, String> {
 fn run_add(args: &[&str], path_override: Option<&Path>) -> Result<String, String> {
     let options = parse_add_options(args)?;
     let path = resolve_config_path(path_override)?;
-    let (mut doc, _) = ConfigDoc::load_or_default(&path)?;
-
-    let insert_at = match options.position {
-        Some(position) => {
-            let max_position = doc.rules.len() + 1;
-            if position > max_position {
-                return Err(format!(
-                    "--position {position} is out of range (valid: 1..={max_position})"
-                ));
-            }
-            position - 1
-        }
-        None => doc.rules.len(),
-    };
-
     let (action, workspace) = match options.action {
         ActionArg::Workspace(workspace) => ("route".to_owned(), Some(workspace)),
         ActionArg::Float => ("float".to_owned(), None),
@@ -247,10 +257,23 @@ fn run_add(args: &[&str], path_override: Option<&Path>) -> Result<String, String
         action,
         workspace,
     };
-    doc.rules.insert(insert_at, rule.clone());
-    doc.save_atomic(&path)?;
 
-    let display_index = insert_at + 1;
+    let display_index = ConfigDoc::edit_locked(&path, |doc| {
+        let insert_at = match options.position {
+            Some(position) => {
+                let max_position = doc.rules.len() + 1;
+                if position > max_position {
+                    return Err(format!(
+                        "--position {position} is out of range (valid: 1..={max_position})"
+                    ));
+                }
+                position - 1
+            }
+            None => doc.rules.len(),
+        };
+        doc.rules.insert(insert_at, rule.clone());
+        Ok((insert_at + 1, true))
+    })?;
     if options.json {
         to_json_pretty(&RuleAddedOutput {
             path: path.display().to_string(),
@@ -352,38 +375,38 @@ fn parse_remove_args(args: &[&str]) -> Result<(RemoveTarget, bool), String> {
 fn run_remove(args: &[&str], path_override: Option<&Path>) -> Result<String, String> {
     let (target, json) = parse_remove_args(args)?;
     let path = resolve_config_path(path_override)?;
-    let (mut doc, _) = ConfigDoc::load_or_default(&path)?;
 
-    let mut removed = Vec::new();
-    match target {
-        RemoveTarget::Index(position) => {
-            if position == 0 || position > doc.rules.len() {
-                return Err(format!(
-                    "rule index {position} is out of range ({} rules configured)",
-                    doc.rules.len()
-                ));
+    let (removed, remaining) = ConfigDoc::edit_locked(&path, |doc| {
+        let mut removed = Vec::new();
+        match target {
+            RemoveTarget::Index(position) => {
+                if position == 0 || position > doc.rules.len() {
+                    return Err(format!(
+                        "rule index {position} is out of range ({} rules configured)",
+                        doc.rules.len()
+                    ));
+                }
+                let rule = doc.rules.remove(position - 1);
+                removed.push(RuleView::from_doc(position, &rule));
             }
-            let rule = doc.rules.remove(position - 1);
-            removed.push(RuleView::from_doc(position, &rule));
-        }
-        RemoveTarget::App(bundle_id) => {
-            let mut kept = Vec::with_capacity(doc.rules.len());
-            for (index, rule) in doc.rules.drain(..).enumerate() {
-                if rule.bundle_id.as_deref() == Some(bundle_id.as_str()) {
-                    removed.push(RuleView::from_doc(index + 1, &rule));
-                } else {
-                    kept.push(rule);
+            RemoveTarget::App(bundle_id) => {
+                let mut kept = Vec::with_capacity(doc.rules.len());
+                for (index, rule) in doc.rules.drain(..).enumerate() {
+                    if rule.bundle_id.as_deref() == Some(bundle_id.as_str()) {
+                        removed.push(RuleView::from_doc(index + 1, &rule));
+                    } else {
+                        kept.push(rule);
+                    }
+                }
+                doc.rules = kept;
+                if removed.is_empty() {
+                    return Err(format!("no rules found for bundle_id {bundle_id:?}"));
                 }
             }
-            doc.rules = kept;
-            if removed.is_empty() {
-                return Err(format!("no rules found for bundle_id {bundle_id:?}"));
-            }
         }
-    }
-
-    doc.save_atomic(&path)?;
-    let remaining = doc.rules.len();
+        let remaining = doc.rules.len();
+        Ok(((removed, remaining), true))
+    })?;
     if json {
         to_json_pretty(&RuleRemovedOutput {
             path: path.display().to_string(),

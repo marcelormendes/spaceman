@@ -168,3 +168,54 @@ fn constrained_tile_only_reports_overlap_with_a_visible_tiled_neighbor() {
             .any(|(kind, _)| *kind == AnomalyKind::ConstrainedOverlap)
     );
 }
+
+#[test]
+fn visible_overflowing_window_whose_center_falls_in_display_gap_is_not_stranded() {
+    let wide = window(10);
+    let mut runtime = runtime(FakeBackend::default());
+    bind(&mut runtime, WorkspaceId::ONE, &wide);
+    let staggered = macos::DisplayOutputs::new(vec![
+        macos::DisplayOutput {
+            id: "main".into(),
+            name: "Main".into(),
+            frame: crate::Rect {
+                x: 0,
+                y: 0,
+                width: 1000,
+                height: 800,
+            },
+            is_main: true,
+        },
+        macos::DisplayOutput {
+            id: "secondary".into(),
+            name: "Secondary".into(),
+            frame: crate::Rect {
+                x: 1000,
+                y: 900,
+                width: 1000,
+                height: 800,
+            },
+            is_main: false,
+        },
+    ])
+    .unwrap();
+    runtime.backend.frames.insert(
+        wide.clone(),
+        crate::Rect {
+            x: 0,
+            y: 0,
+            width: 2200,
+            height: 800,
+        },
+    );
+    let visible = runtime.visible_workspaces(&staggered);
+    let server = runtime.backend.window_server_frames().unwrap();
+    let windows = runtime.arranged_windows(&server);
+    let anomalies = runtime.anomalies(&staggered, &visible, &windows, &server);
+    assert!(
+        !anomalies.iter().any(
+            |anomaly| anomaly.kind == AnomalyKind::Stranded && anomaly.window == wide.window_id
+        ),
+        "visible overflowing window should not be reported as stranded: {anomalies:?}"
+    );
+}

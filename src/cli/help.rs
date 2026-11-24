@@ -1,5 +1,5 @@
 pub(crate) fn version() -> String {
-    format!("spaceman {}", env!("CARGO_PKG_VERSION"))
+    format!("spaceman {}", spaceman::build_version())
 }
 
 pub(crate) fn is_help_flag(arg: &str) -> bool {
@@ -46,7 +46,7 @@ pub(crate) fn root(executable: &str) -> String {
     let mut sections = vec![
         format!(
             "Spaceman {} — macOS tiling window manager",
-            env!("CARGO_PKG_VERSION")
+            spaceman::build_version()
         ),
         String::new(),
         format!("Usage: {executable} <command> [args...]"),
@@ -163,6 +163,7 @@ pub(crate) fn config_help(executable: &str) -> String {
         "  hud             true | false      Show the Workspace HUD overlay (default: true)",
         "  hud_style       icons | layouts   Workspace HUD drawing style (default: icons)",
         "  update_channel  stable | dev      In-app updater release channel (default: stable)",
+        "  mouse_follows_focus  off | display | window  Move pointer on focus changes (default: off)",
         "  gaps.inner      0-48              Points between tiled windows (default: 0)",
         "  gaps.top        0-128             Outer padding at the screen's top edge (default: 0;",
         "  gaps.bottom     0-128               likewise gaps.bottom, gaps.left, gaps.right)",
@@ -254,15 +255,19 @@ pub(crate) fn ctl_help(executable: &str) -> String {
         "  balance                    Reset split weights evenly",
         "  retile                     Force a fresh observation and retile",
         "",
+        "Labs (need [labs] scratchpad = true):",
+        "  scratchpad toggle          Summon the next scratchpad window, or hide the one shown",
+        "  scratchpad mark            Send the focused window to the scratchpad, or take it out",
+        "",
         "Agent & UI:",
         "  pause | resume             Pause (and restore windows) or resume tiling",
         "  wrong                      Record an anomaly marker in the arrangement journal",
         "  open <url-or-target>       Open Settings on a spaceman:// link, pane, feature, or Lab",
         "  open-settings              Open the Spaceman Settings window",
         "  open-accessibility         Open Accessibility onboarding / System Settings",
-        "  check-for-updates          Trigger a Sparkle update check",
+        "  check-for-updates          Check for Spaceman updates",
         "  toggle-launch-at-login     Toggle Launch at Login registration",
-        "  restart | quit             Restore windows and restart or quit the agent",
+        "  restart | quit             Restore parked windows and exit the agent (does not relaunch)",
     ]
     .join("\n")
 }

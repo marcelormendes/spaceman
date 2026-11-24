@@ -9,6 +9,9 @@ version = 1
 hud = true
 hud_style = "icons"
 update_channel = "stable"
+# Move the mouse pointer on explicit keyboard/ctl focus changes: "off" (default),
+# "display" (only when focus lands on another display), or "window" (every focus change).
+# mouse_follows_focus = "off"
 # Center a window that is alone on its display (or in Fullscreen Layout) at this width;
 # 0 (the default) lets it fill the display. 320 through 16384 points.
 single_window_max_width = 0
@@ -60,3 +63,25 @@ monitor = "main"
 [[workspaces]]
 workspace = "D"
 monitor = "main"
+
+# Shortcuts are optional and left commented out, so copying this file keeps every
+# built-in shortcut. Bindings use `spaceman ctl` commands and replace the built-in
+# shortcut on the same chord; "none" unbinds one. Set defaults = false to register
+# only these bindings. Changes register live without a restart. Every chord needs alt, cmd,
+# or ctrl, so a plain letter can never be hijacked. Avoid a bare-Option chord such
+# as "alt+left": it replaces macOS's Option+arrow word jump in every text field.
+#
+# [shortcuts]
+# defaults = true
+#
+# [shortcuts.bindings]
+# "alt+shift+ctrl+left" = "focus left"
+# "alt+shift+ctrl+right" = "focus right"
+# "alt+shift+b" = "balance"
+
+# Labs are experimental features, each off by default. scratchpad = true adds an
+# i3/sway-style Scratchpad: Option+Shift+\ hides the focused window in it and
+# Option+\ summons it centred on the focused display (or hides it again).
+#
+# [labs]
+# scratchpad = false

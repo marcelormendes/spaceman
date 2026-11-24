@@ -55,9 +55,10 @@ pub(crate) const SCENES: &[Scene] = &[
 ];
 
 /// An app being dragged: its rule, where it started and how far the pointer has gone.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Drag {
     pub rule: usize,
+    snapshot: Rule,
     /// The dragged item's top-left in the map, and its size.
     origin: (f32, f32),
     size: (f32, f32),
@@ -85,6 +86,7 @@ impl Drag {
         );
         Some(Drag {
             rule: rule.index,
+            snapshot: rule,
             origin,
             size,
             grab,
@@ -238,6 +240,7 @@ pub fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
             .map_or(&[][..], |agent| agent.active_workspaces.as_slice()),
         target: ui
             .drag
+            .as_ref()
             .filter(|drag| drag.moved)
             .and_then(|drag| drag.target),
     };
@@ -264,7 +267,7 @@ pub fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
                 .absolute(0.0, layout.grid.float_head_top()),
         )
         .child(view.float_box(layer));
-    if let Some(drag) = ui.drag.filter(|drag| drag.moved) {
+    if let Some(drag) = ui.drag.as_ref().filter(|drag| drag.moved) {
         map = map.children(view.ghost(drag));
     }
     // Drag positions are in map coordinates, so scrolling the body doesn't move drop targets.
@@ -488,8 +491,10 @@ impl MapView<'_> {
         let dragging = self
             .ui
             .drag
+            .as_ref()
             .is_some_and(|drag| drag.rule == index && drag.moved);
         let grid = self.layout.grid.clone();
+        let drag_rule = rule.clone();
         let item = item
             .key(format!("rule-{index}"))
             .role("button")
@@ -498,7 +503,7 @@ impl MapView<'_> {
             .cursor(Cursor::Grab)
             .opacity(if dragging { 0.3 } else { 1.0 })
             .on_drag(move |ui: &mut Ui, d: &mut rune::Drag, _: &mut Tx| {
-                drag(ui, d, index, origin, size, |x, y| grid.target_at(x, y))
+                drag(ui, d, &drag_rule, origin, size, |x, y| grid.target_at(x, y))
             })
             .on_secondary_press(move |ui: &mut Ui, press: PointerPress, _: &mut Tx| {
                 ui.menu = Some(Menu::Rule(index, press));
@@ -511,21 +516,23 @@ impl MapView<'_> {
             .on_close(|ui: &mut Ui| ui.menu = None);
         if point.is_some() {
             if rule.place != Place::Float {
+                let expected = rule.clone();
                 menu = menu.item(MenuItem::new("Float").on_select(move |ui: &mut Ui| {
                     ui.menu = None;
-                    ui.edit_and_retile(|doc| doc.place(index, Place::Float));
+                    ui.try_edit_and_retile(|doc| doc.place_matching(&expected, Place::Float));
                 }));
             }
+            let expected = rule.clone();
             menu = menu.item(MenuItem::new("Remove rule").on_select(move |ui: &mut Ui| {
                 ui.menu = None;
-                ui.edit_and_retile(|doc| doc.remove(index));
+                ui.try_edit_and_retile(|doc| doc.remove_matching(&expected));
             }));
         }
         menu.build(self.p.k, layer)
     }
 
     /// The dragged item, following the pointer above everything else in the map.
-    fn ghost(self, drag: Drag) -> Option<El> {
+    fn ghost(self, drag: &Drag) -> Option<El> {
         let rule = self
             .layout
             .routed
@@ -594,52 +601,80 @@ impl MapView<'_> {
 fn drag(
     ui: &mut Ui,
     d: &rune::Drag,
-    rule: usize,
+    rule: &Rule,
     origin: (f32, f32),
     size: (f32, f32),
     target_at: impl Fn(f32, f32) -> Option<Place>,
 ) {
-    match d.phase {
+    drag_step(
+        ui,
+        d.phase,
+        (d.start_x, d.start_y),
+        (d.dx, d.dy),
+        d.cancelled(),
+        rule,
+        origin,
+        size,
+        target_at,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drag_step(
+    ui: &mut Ui,
+    phase: rune::Phase,
+    start: (f32, f32),
+    delta: (f32, f32),
+    cancelled: bool,
+    rule: &Rule,
+    origin: (f32, f32),
+    size: (f32, f32),
+    target_at: impl Fn(f32, f32) -> Option<Place>,
+) {
+    match phase {
         rune::Phase::Down => {
             ui.menu = None;
             ui.drag = Some(Drag {
-                rule,
+                rule: rule.index,
+                snapshot: rule.clone(),
                 origin,
                 size,
-                grab: (d.start_x, d.start_y),
+                grab: start,
                 delta: (0.0, 0.0),
                 moved: false,
                 target: None,
             });
         }
         rune::Phase::Move => {
-            let Some(drag) = ui.drag.as_mut().filter(|drag| drag.rule == rule) else {
+            let Some(drag) = ui.drag.as_mut().filter(|drag| drag.rule == rule.index) else {
                 return;
             };
-            drag.delta = (d.dx, d.dy);
-            drag.moved |= d.dx.abs().max(d.dy.abs()) >= SLOP;
-            drag.target = target_at(origin.0 + drag.grab.0 + d.dx, origin.1 + drag.grab.1 + d.dy);
+            drag.delta = delta;
+            drag.moved |= delta.0.abs().max(delta.1.abs()) >= SLOP;
+            drag.target = target_at(
+                origin.0 + drag.grab.0 + delta.0,
+                origin.1 + drag.grab.1 + delta.1,
+            );
         }
         rune::Phase::Up => {
-            let Some(drag) = ui.drag.take().filter(|drag| drag.rule == rule) else {
+            let Some(drag) = ui.drag.take().filter(|drag| drag.rule == rule.index) else {
                 return;
             };
-            if d.cancelled() || !drag.moved {
+            if cancelled || !drag.moved {
+                ui.flush_pending_reload();
                 return;
             }
-            let current = ui
-                .doc
-                .rules()
-                .into_iter()
-                .find(|r| r.index == rule)
-                .map(|r| r.place);
             let Some(target) = drag.target else {
+                ui.flush_pending_reload();
                 return;
             };
-            let unchanged = current == Some(target)
-                || (target == Place::Float && current == Some(Place::Ignore));
-            if !unchanged {
-                ui.edit_and_retile(|doc| doc.place(rule, target));
+            let current = drag.snapshot.place;
+            let unchanged =
+                current == target || (target == Place::Float && current == Place::Ignore);
+            if unchanged {
+                ui.flush_pending_reload();
+            } else {
+                ui.try_edit_and_retile(|doc| doc.place_matching(&drag.snapshot, target));
             }
         }
     }
@@ -675,5 +710,137 @@ mod tests {
         for rule in doc.rules() {
             assert!(layout.spot(&rule).is_some(), "{rule:?}");
         }
+    }
+
+    #[test]
+    fn rule_drag_preserves_external_save_and_flushes_deferred_reload_on_cancel() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "spaceman-map-drag-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let initial = concat!(
+            "version = 1\n\n",
+            "[settings]\n",
+            "hud = true\n\n",
+            "[[rules]]\n",
+            "bundle_id = \"com.apple.TextEdit\"\n",
+            "action = \"route\"\n",
+            "workspace = 1\n",
+        );
+        let external_hud_off = concat!(
+            "version = 1\n\n",
+            "[settings]\n",
+            "hud = false\n\n",
+            "[[rules]]\n",
+            "bundle_id = \"com.apple.TextEdit\"\n",
+            "action = \"route\"\n",
+            "workspace = 1\n",
+        );
+        std::fs::write(&path, initial).unwrap();
+
+        let mut ui = crate::playground::blank_fixture();
+        ui.fixture = false;
+        ui.doc = Doc::load_from(path.clone());
+        let layout = Layout::new(&ui.doc);
+        let rule = ui.doc.rules()[0].clone();
+        let (origin, size) = layout.spot(&rule).unwrap();
+        let ws2 = layout.grid.tile_origin(1);
+        let dx = ws2.0 + TILE_W / 2.0 - origin.0 - size.0 / 2.0;
+        let dy = ws2.1 + TILE_H / 2.0 - origin.1 - size.1 / 2.0;
+
+        let grab = (size.0 / 2.0, size.1 / 2.0);
+
+        // 1. Hold pointer down on TextEdit, receive an external save mid-drag, then drop on ws 2.
+        drag_step(
+            &mut ui,
+            rune::Phase::Down,
+            grab,
+            (0.0, 0.0),
+            false,
+            &rule,
+            origin,
+            size,
+            |x, y| layout.grid.target_at(x, y),
+        );
+        assert!(ui.drag.is_some());
+        std::fs::write(&path, external_hud_off).unwrap();
+        assert!(
+            !ui.on_config_changed(),
+            "reload must defer while a drag is active"
+        );
+        assert!(ui.doc.reload_pending());
+        drag_step(
+            &mut ui,
+            rune::Phase::Move,
+            grab,
+            (dx, dy),
+            false,
+            &rule,
+            origin,
+            size,
+            |x, y| layout.grid.target_at(x, y),
+        );
+        drag_step(
+            &mut ui,
+            rune::Phase::Up,
+            grab,
+            (dx, dy),
+            false,
+            &rule,
+            origin,
+            size,
+            |x, y| layout.grid.target_at(x, y),
+        );
+        assert!(ui.drag.is_none());
+        assert_eq!(ui.error, None);
+        assert!(!ui.doc.reload_pending());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let parsed = spaceman::config::Config::parse(&saved).unwrap();
+        assert!(!parsed.hud(), "external hud = false must survive:\n{saved}");
+        assert_eq!(ui.doc.rules()[0].place, Place::Workspace(WorkspaceId::TWO));
+        assert!(saved.contains("workspace = 2"), "{saved}");
+
+        // 2. Cancelled drag flushes a deferred reload immediately instead of leaving Rules stale.
+        let rule_ws2 = ui.doc.rules()[0].clone();
+        drag_step(
+            &mut ui,
+            rune::Phase::Down,
+            grab,
+            (0.0, 0.0),
+            false,
+            &rule_ws2,
+            origin,
+            size,
+            |x, y| layout.grid.target_at(x, y),
+        );
+        std::fs::write(&path, initial).unwrap();
+        assert!(!ui.on_config_changed());
+        drag_step(
+            &mut ui,
+            rune::Phase::Up,
+            grab,
+            (0.0, 0.0),
+            true,
+            &rule_ws2,
+            origin,
+            size,
+            |x, y| layout.grid.target_at(x, y),
+        );
+        assert!(ui.drag.is_none());
+        assert!(!ui.doc.reload_pending());
+        assert!(ui.doc.hud(), "deferred reload must apply after drag cancel");
+        assert_eq!(ui.doc.rules()[0].place, Place::Workspace(WorkspaceId::ONE));
+
+        // 3. Control: idle config_changed notification reloads immediately.
+        std::fs::write(&path, external_hud_off).unwrap();
+        assert!(ui.on_config_changed());
+        assert!(!ui.doc.hud());
+
+        drop(std::fs::remove_dir_all(dir));
     }
 }

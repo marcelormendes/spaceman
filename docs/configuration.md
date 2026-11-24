@@ -25,7 +25,8 @@ The complete example is [config.example.toml](../config.example.toml).
 ## Current Schema
 
 The parser rejects unknown fields. The root must contain `version = 1` and may contain an optional
-`[settings]` table plus repeated `[[rules]]` and `[[workspaces]]` tables.
+`[settings]` table, an optional `[shortcuts]` table (see [Shortcuts](#shortcuts)), an optional
+`[labs]` table (see [Labs](#labs)), plus repeated `[[rules]]` and `[[workspaces]]` tables.
 
 ```toml
 version = 1
@@ -34,6 +35,7 @@ version = 1
 hud = true                            # optional (default: true); non-activating Workspace HUD
 hud_style = "icons"                   # optional (default: "icons"); or "layouts"
 update_channel = "stable"             # optional (default: "stable"); or "dev", a build of every merge
+mouse_follows_focus = "off"           # optional (default: "off"); or "display", "window"
 single_window_max_width = 0           # optional (default: 0, off); or 320 through 16384 points
 
 [settings.gaps]                       # optional; every key defaults to 0
@@ -81,8 +83,8 @@ Rules run in file order and the first matching rule wins. An unmatched window is
   parked. Use it for applications that insist on positioning their own windows. Previously managed
   windows (including parked ones) are restored and released when the rule reloads.
 
-During the startup recovery window, an unmatched window of an application that has not yet been seen
-in the session may return to a remembered workspace; see
+During startup recovery, after a qualifying mid-session relaunch, or for an application marked to
+return, an unmatched window may return to a remembered workspace; see
 [Remembered Placements](#remembered-placements). Matching `route` and `ignore` rules always win over
 memory.
 
@@ -104,8 +106,10 @@ ultrawide displays, where one full-width window is hard to read.
 Out-of-range values are rejected with a message naming the key and its range, like any other invalid
 configuration. Every key defaults to `0`, so a file without them tiles exactly as before.
 
-Settings › Layout edits the same keys over a live miniature of the result, and `spaceman config`
-reads and writes them by dotted key:
+Settings › Layout edits the same keys over a live miniature of the result. One **Window gaps**
+slider sets `inner` and all four edges together; **Customize separately** (open on its own when the
+file's gaps differ) sets between windows, all screen edges, and each edge on its own.
+`spaceman config` reads and writes them by dotted key:
 
 ```sh
 spaceman config set gaps.inner 8
@@ -114,6 +118,102 @@ spaceman config set single_window_max_width 1680
 spaceman config get gaps.inner
 ```
 
+## Shortcuts
+
+`[shortcuts]` rebinds Spaceman's global shortcuts. Each entry in `[shortcuts.bindings]` maps a chord
+to a command in `spaceman ctl` syntax:
+
+```toml
+[shortcuts]
+defaults = true                       # optional (default: true); false registers only these bindings
+modifier = "alt"                      # optional (default: "alt"); every built-in shortcut holds it
+
+[shortcuts.bindings]
+"alt+left" = "move-direction left"     # replaces macOS's Option+arrow word jump everywhere
+"alt+shift+ctrl+left" = "focus left"
+"alt+v" = "float"
+"alt+j" = "layout"                    # replaces the built-in Option+J (focus down)
+"alt+shift+b" = "balance"
+"alt+h" = "none"                      # unbinds the built-in Option+H
+```
+
+`modifier` moves every built-in shortcut at once: `"ctrl+alt"` makes Switch to workspace 3
+`Control+Option+3` and Move to workspace 3 `Control+Option+Shift+3`. It takes the same modifier names
+as a chord, needs `alt`, `cmd`, or `ctrl`, and can't include `shift`, which the built-in Move
+shortcuts add. Bindings are exact chords and don't follow it.
+
+A chord is one or more modifiers and one key, joined by `+`, in any order and case:
+
+- modifiers: `alt` (also `opt`, `option`), `cmd` (`command`), `ctrl` (`control`), and `shift`.
+  Every chord needs `alt`, `cmd`, or `ctrl`.
+- keys: a single character such as `j`, `/`, `-`, `=`, or `` ` `` (found on whatever key types it in
+  the active keyboard layout, like the built-in shortcuts); `1` through `9` and `0` (the physical
+  number row, so `0` is workspace 10); `left`, `right`, `up`, `down`, `return` (`enter`), `tab`,
+  `space`, `escape` (`esc`), `backspace` (`delete`), `forwarddelete`, `home`, `end`, `pageup`,
+  `pagedown`, and `f1` through `f12`. `alt++` is the `+` key.
+
+Commands:
+
+| Command | Action |
+| --- | --- |
+| `switch WORKSPACE` | Switch to workspace 1 through 10 or an enabled named workspace A through Z |
+| `move WORKSPACE` | Move the focused window there without switching |
+| `back-and-forth` | Return to the previous workspace |
+| `move-workspace [next\|prev\|DISPLAY]` | Move the focused workspace to another display |
+| `focus left\|down\|up\|right` | Focus the nearest tile in that direction |
+| `focus next` | Focus the next tiled window in the workspace |
+| `move-direction left\|down\|up\|right` | Move the focused tile in that direction |
+| `layout` | Toggle the active layout's root split axis |
+| `fullscreen` | Toggle Fullscreen Layout |
+| `float` | Float the focused window, or tile it again |
+| `resize shrink\|grow` | Shrink or grow the focused tile |
+| `balance` | Reset the active workspace's split weights |
+| `retile` | Retile now |
+| `none` | Unbind the chord: no built-in shortcut claims it |
+
+A global shortcut fires in every app, so a chord that types something takes that key everywhere:
+`alt+left` replaces macOS's Option+arrow word jump in text fields. Prefer `ctrl` or `alt+shift` for
+rebinds that must not disturb typing.
+
+Bindings claim their chords before the built-in shortcuts, so a binding on a built-in chord replaces
+it and the other built-ins stay. With `defaults = false` only the listed bindings register, and the
+table must bind at least one command (tiling needs at least one shortcut to start). Two spellings of
+the same chord, an unknown modifier, key, or command, or a chord without `alt`, `cmd`, or `ctrl` is a
+config error. A binding whose workspace is not enabled, or that the keyboard layout cannot type, is
+skipped and logged in `agent.log` while the other shortcuts register.
+
+Shortcut changes apply live: saving `config.toml` registers the new chords within a couple of
+seconds, without a restart. Named workspaces added or removed by a config edit also update their
+shortcuts live (keeping an occupied named workspace registered until it empties). If the new table
+can't be registered, the previous shortcuts keep working and Settings shows `Shortcuts not applied`
+with the reason. The menu-bar workspace list keeps showing the built-in `Option`+number/letter hints
+next to each workspace.
+
+Settings › Shortcuts edits the same table. Click a shortcut's keys and press a new chord: it is saved
+to `[shortcuts.bindings]` and registered at once, and the built-in chord it replaces gets `none`.
+While Settings records, every global shortcut is held off so the chord reaches it (for at most a
+minute). `esc` cancels, `⌫` or `Delete` on its own clears the shortcut (`none`), a chord without
+`⌥`, `⌃`, or `⌘` is refused, and so is a chord another shortcut uses, naming it. Base modifier
+sets `modifier`, and Reset to Defaults removes the `[shortcuts]` table. Comments and other bindings
+in the file are kept.
+
+## Labs
+
+`[labs]` turns on experimental features one by one. Every switch is off by default, and with all of
+them off Spaceman behaves exactly as if Labs did not exist: no extra shortcuts register and no
+command changes behavior. Unknown keys are config errors.
+
+```toml
+[labs]
+scratchpad = false                    # optional (default: false); the i3/sway-style Scratchpad
+```
+
+`scratchpad = true` enables the Scratchpad (see [Controls › Scratchpad](controls.md#scratchpad-lab)) and
+registers its two shortcuts, `Option+\` and `Option+Shift+\`, live without a restart (or on the next
+hotkey registration if tiling is paused); a `[shortcuts]` binding on either chord takes it instead. The
+`spaceman ctl scratchpad` commands follow the switch live. Turning the switch off while windows are
+hidden in the scratchpad brings them back on screen, where they tile again.
+
 ## Remembered Placements
 
 Window identity in workspace state is tied to a running process, so it cannot survive a reboot or an
@@ -121,16 +221,31 @@ application relaunch. Spaceman therefore also remembers, per application bundle 
 workspace each managed window lived on, whether it floated, and its last on-screen frame. It never
 records window titles.
 
-During the first 60 seconds after Spaceman starts, when an application bundle is seen for the first
-time and owns no windows yet (such as after a reboot or a Spaceman start without valid workspace
-state), its windows may claim those remembered placements:
-first a window whose frame matches a remembered frame within 8 pixels, then the remaining windows in
-creation order. A claimed window joins its remembered workspace (hidden if that workspace is not
-visible). Applications launched later during the session, or relaunched after already having been seen,
-open on the active workspace instead of recalling historical placements. Windows beyond the remembered
-count, windows opened after the recall window closes, and placements on workspaces that are no longer
-enabled or managed are adopted on the active workspace. Multi-window applications that
-restore windows with identical frames are matched by creation order, which is a best guess.
+A new application process that owns no windows yet may claim its remembered placements in three
+cases:
+
+- **Startup recovery:** during the first 60 seconds after Spaceman starts, when an application
+  bundle is seen for the first time in the session (such as after a reboot or a Spaceman start
+  without valid workspace state).
+- **Mid-session relaunch:** after the startup window, when another process of the same application
+  quit within the last 30 seconds or still owns windows (for example, an in-app update or restart
+  that launches the new process before the old one exits).
+- **Returning applications:** when you move a newly opened window to another workspace by hand
+  within 120 seconds of it opening on the active workspace, Spaceman marks that application to
+  return so later launches recall its remembered placements as well.
+
+Matching `route` and `ignore` rules always take precedence over memory (an application with a
+bundle-level `route` rule does not open a recall, and per-window `route` and `ignore` rules skip
+recall). An ordinary later launch without a qualifying relaunch or returning mark opens on the
+active workspace instead of recalling historical placements.
+
+During a 60-second recall window, eligible windows claim remembered placements: first a window whose
+frame matches a remembered frame within 8 pixels, then the remaining windows in creation order. A
+claimed window joins its remembered workspace (hidden if that workspace is not visible, and floating
+again if it was saved floating). Windows beyond the remembered count, windows opened after the
+recall window closes, and placements on workspaces that are no longer enabled or managed are adopted
+on the active workspace. Multi-window applications that restore windows with identical frames are
+matched by creation order, which is a best guess.
 
 A changed arrangement replaces an application's memory only after it holds for 10 seconds while the
 application keeps running, so the windows closing one by one as an application quits do not erase
@@ -181,12 +296,14 @@ normal recovery data.
 ## Applying Changes
 
 Edits saved in Spaceman Settings or in an external editor take effect automatically without
-restarting: rule changes move, float, tile, or release matching open windows right away; workspace
-display assignments, named workspace shortcuts (`Option+A` ... `Option+Z`, registering added letters
-and unregistering removed empty ones), `settings.hud`, `settings.hud_style`, `settings.gaps`, and
-`settings.single_window_max_width` reload live (Settings › Rules, Workspaces, and Layout retile at
-once; external edits apply on the next retile); `settings.update_channel` applies at the next update
-ever want a clean restart:
+restarting: rule changes move, float, tile, or release matching open windows right away (while
+leaving scratchpad windows alone); `[shortcuts]`, `[labs] scratchpad`, workspace display
+assignments, named workspace shortcuts (`Option+A` ... `Option+Z`, registering added letters and
+unregistering removed empty ones), `settings.hud`, `settings.hud_style`,
+`settings.mouse_follows_focus`, `settings.gaps`, and `settings.single_window_max_width` reload live
+(Settings › Rules, Workspaces, Shortcuts, and Layout apply at once; external edits apply on the next
+retile or probe); `settings.update_channel` applies at the next update check. If you ever want a
+clean restart:
 
 ```sh
 spaceman ctl pause

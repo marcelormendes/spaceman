@@ -160,6 +160,25 @@ fn override_for(workspace: WorkspaceId, chosen: &str) -> Option<String> {
     (chosen != default_monitor(workspace)).then(|| chosen.to_owned())
 }
 
+/// The row's muted caption: an unplugged preferred display always falls back to Main in
+/// `DisplayInventory::resolve`, even for workspaces 6–10 whose built-in default is Secondary.
+fn row_description(workspace: WorkspaceId, effective: &str, unplugged: bool) -> Option<String> {
+    if unplugged {
+        return Some("Not connected · uses Main until it returns".to_owned());
+    }
+    let default = default_monitor(workspace);
+    if effective != default {
+        let default_label = if default == SECONDARY {
+            "Secondary"
+        } else {
+            "Main"
+        };
+        Some(format!("Default: {default_label}"))
+    } else {
+        None
+    }
+}
+
 /// The picker's segments and the selected one: every display's label, then `Not connected` when
 /// `effective` names a display that is not plugged in.
 fn picker(choices: &[Choice], effective: &str) -> (Vec<String>, usize) {
@@ -193,21 +212,8 @@ fn monitor_row(p: Paint, choices: &[Choice], workspace: WorkspaceId, effective: 
         Some(_) => format!("Workspace {workspace}"),
         None => format!("Workspace {workspace} (named)"),
     };
-    let default_label = if default_monitor(workspace) == SECONDARY {
-        "Secondary"
-    } else {
-        "Main"
-    };
-    let description = if selected >= choices.len() {
-        Some((
-            format!("Not connected · uses {default_label} until it returns"),
-            p.faint(),
-        ))
-    } else if effective != default_monitor(workspace) {
-        Some((format!("Default: {default_label}"), p.faint()))
-    } else {
-        None
-    };
+    let description = row_description(workspace, effective, selected >= choices.len())
+        .map(|copy| (copy, p.faint()));
     controls::setting_row(
         p,
         &format!("workspace-{workspace}"),
@@ -461,6 +467,47 @@ mod tests {
             doc.monitor(WorkspaceId::new(9).unwrap()).as_deref(),
             Some(THIRD_FIXTURE_ID),
             "the assignment survives rendering"
+        );
+    }
+
+    #[test]
+    fn disconnected_workspace_6_to_10_names_main_as_fallback_and_restores_on_reconnect() {
+        let seven = WorkspaceId::new(7).unwrap();
+        let mut doc = Doc::parse("version = 1\n");
+        doc.set_monitor(seven, Some(THIRD_FIXTURE_ID));
+
+        // Third display unplugged while Main and Secondary remain connected.
+        let pair_choices = choices(&fixture_pair());
+        let saved = effective_monitor(&doc, seven);
+        let (_, selected) = picker(&pair_choices, &saved);
+        assert_eq!(selected, pair_choices.len());
+        assert_eq!(
+            row_description(seven, &saved, selected >= pair_choices.len()).as_deref(),
+            Some("Not connected · uses Main until it returns")
+        );
+        assert_eq!(doc.monitor(seven).as_deref(), Some(THIRD_FIXTURE_ID));
+
+        // Reconnecting the third display resumes showing it without losing the assignment.
+        let three_choices = choices(&fixture_three());
+        let (_, reconnected) = picker(&three_choices, &saved);
+        assert_eq!(reconnected, 2);
+        assert_eq!(
+            row_description(seven, &saved, reconnected >= three_choices.len()).as_deref(),
+            Some("Default: Secondary")
+        );
+
+        // An ordinary workspace 7 on Secondary still shows Secondary with no override note.
+        let default_doc = Doc::parse("version = 1\n");
+        let default_effective = effective_monitor(&default_doc, seven);
+        let (_, default_selected) = picker(&pair_choices, &default_effective);
+        assert_eq!(default_selected, 1);
+        assert_eq!(
+            row_description(
+                seven,
+                &default_effective,
+                default_selected >= pair_choices.len()
+            ),
+            None
         );
     }
 }

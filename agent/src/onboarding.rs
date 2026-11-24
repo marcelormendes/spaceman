@@ -1,6 +1,10 @@
 //! Setup tour orchestration and live polling.
 
+mod desk;
 mod flow;
+#[cfg(target_os = "macos")]
+mod keys;
+mod sandbox;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -8,6 +12,7 @@ mod view;
 use std::time::{Duration, Instant};
 
 pub use flow::{Effect, Flow, Input, SetupState, Step, launch_step};
+pub use sandbox::{Key, Sandbox};
 pub use view::overlay;
 
 use rune::Tx;
@@ -19,12 +24,24 @@ use crate::{
 };
 
 const ADVANCE_BEAT: Duration = Duration::from_millis(700);
+/// How long after a real shortcut the setup window comes back to the front, so the app that
+/// shortcut brought forward settles first.
+#[cfg(target_os = "macos")]
+const RAISE_AFTER: Duration = Duration::from_millis(350);
 
 pub struct Tour {
     pub flow: Flow,
     pub conflicts: Vec<String>,
+    /// The Done step's practice desktop.
+    pub sandbox: Sandbox,
     advance_at: Option<Instant>,
     completed: bool,
+    /// Hears the practice shortcuts while the Done step shows in a live window.
+    #[cfg(target_os = "macos")]
+    keys: Option<keys::Listener>,
+    /// When to bring the setup window back after a shortcut that also ran for real.
+    #[cfg(target_os = "macos")]
+    raise_at: Option<Instant>,
 }
 
 impl Tour {
@@ -36,8 +53,13 @@ impl Tour {
         Self {
             flow: Flow::new(step, status, false),
             conflicts: apps::conflicting_window_managers(),
+            sandbox: Sandbox::default(),
             advance_at: None,
             completed: false,
+            #[cfg(target_os = "macos")]
+            keys: None,
+            #[cfg(target_os = "macos")]
+            raise_at: None,
         }
     }
 
@@ -46,8 +68,13 @@ impl Tour {
         Self {
             flow: Flow::new(Step::Welcome, status, true),
             conflicts: apps::conflicting_window_managers(),
+            sandbox: Sandbox::default(),
             advance_at: None,
             completed: true,
+            #[cfg(target_os = "macos")]
+            keys: None,
+            #[cfg(target_os = "macos")]
+            raise_at: None,
         }
     }
 
@@ -81,8 +108,13 @@ impl Tour {
         Self {
             flow,
             conflicts,
+            sandbox: Sandbox::default(),
             advance_at: None,
             completed: false,
+            #[cfg(target_os = "macos")]
+            keys: None,
+            #[cfg(target_os = "macos")]
+            raise_at: None,
         }
     }
 }
@@ -113,6 +145,8 @@ pub fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
     }
     apply(ui, effect);
     remember_step(ui, step_before);
+    listen_on_done(ui);
+    raise_after_shortcut(ui);
     if let Some(at) = ui.tour.as_ref().and_then(|tour| tour.advance_at) {
         tx.wake_after(
             ADVANCE_BEAT
@@ -132,7 +166,71 @@ pub fn input(ui: &mut Ui, input: Input) {
     let effect = tour.flow.on(input);
     apply(ui, effect);
     remember_step(ui, step_before);
+    listen_on_done(ui);
 }
+
+/// Plays a practice shortcut on the Done step's desktop. Returns whether the view changed.
+pub fn press(ui: &mut Ui, key: Key) -> bool {
+    match &mut ui.tour {
+        Some(tour) if tour.flow.step() == Step::Done => {
+            tour.sandbox.press(key);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Listens for the practice shortcuts only while a live window shows the Done step.
+#[cfg(target_os = "macos")]
+fn listen_on_done(ui: &mut Ui) {
+    let window = (!ui.fixture).then(|| ui.window.clone()).flatten();
+    let Some(tour) = &mut ui.tour else {
+        return;
+    };
+    if tour.flow.step() != Step::Done {
+        tour.keys = None;
+    } else if tour.keys.is_none()
+        && let Some(window) = window
+    {
+        tour.keys = keys::listen(window);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn listen_on_done(_: &mut Ui) {}
+
+/// A shortcut the key tap heard. With tiling already on, it also ran for real and may have
+/// brought another app forward, so the setup window comes back once that settles.
+#[cfg(target_os = "macos")]
+fn heard(ui: &mut Ui, key: Key, tx: &mut Tx) -> bool {
+    let tiling = !ui.fixture && ui.agent.as_ref().is_some_and(|agent| agent.automatic);
+    let changed = press(ui, key);
+    if changed
+        && tiling
+        && let Some(tour) = &mut ui.tour
+    {
+        tour.raise_at = Some(Instant::now() + RAISE_AFTER);
+        tx.wake_after(RAISE_AFTER);
+    }
+    changed
+}
+
+#[cfg(target_os = "macos")]
+fn raise_after_shortcut(ui: &mut Ui) {
+    let due = ui.tour.as_mut().is_some_and(|tour| {
+        let due = tour.raise_at.is_some_and(|at| Instant::now() >= at);
+        if due {
+            tour.raise_at = None;
+        }
+        due
+    });
+    if due && let Some(window) = &ui.window {
+        crate::host::bring_window_forward(window);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn raise_after_shortcut(_: &mut Ui) {}
 
 /// Ends the tour from the window closing or Escape.
 pub fn dismiss(ui: &mut Ui) {
@@ -243,4 +341,29 @@ pub(crate) const SCENES: &[Scene] = &[
     ("onboarding-done", |ui| {
         tour_scene(ui, Step::Done, true, false)
     }),
+    // Focus moved to the right-hand window; flipping the split is next.
+    ("onboarding-sandbox-step2", |ui| {
+        practice_scene(ui, &[Key::Right])
+    }),
+    // Split flipped to stacked, then over on workspace 2 with its own three windows.
+    ("onboarding-sandbox-workspace-2", |ui| {
+        practice_scene(ui, &[Key::Right, Key::Flip, Key::Workspace(2)])
+    }),
+    ("onboarding-sandbox-complete", |ui| {
+        practice_scene(
+            ui,
+            &[Key::Right, Key::Flip, Key::Workspace(2), Key::Workspace(1)],
+        )
+    }),
 ];
+
+fn practice_scene(ui: &mut Ui, keys: &[Key]) {
+    tour_scene(ui, Step::Done, true, false);
+    if let Some(tour) = &mut ui.tour {
+        for key in keys {
+            tour.sandbox.press(*key);
+        }
+        // Scenes open at rest, not mid-press.
+        tour.sandbox.last = None;
+    }
+}

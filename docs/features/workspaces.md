@@ -11,12 +11,15 @@ Switch workspace                                           // ws.switch
 ├── Incoming parked windows revealed -> laid out -> outgoing windows parked off-screen
 │   └── Reveal not confirmed by the window server in time -> switch rolled back, old workspace stays
 ├── Focus -> last-focused tile of the incoming workspace, keyboard focus included
-│   (that window raised and made main, then its app brought forward with `AXFrontmost`)
+│   (that window raised and made main, then its app brought forward with `AXFrontmost`), unless
+│   one of its windows already has focus (e.g. focus follow): that window keeps it
 └── Already active -> stays, re-focuses its remembered tile (keeps current focus if it is there)
 
 Swipe                                                      // ws.swipe
-└── Three-finger swipe left/right -> next/previous workspace in the menu section of the display
-    under the pointer (visible + occupied), stops at either end
+├── Three-finger swipe left/right -> next/previous workspace in the menu section of the display
+│   under the pointer (visible + occupied), stops at either end
+└── Suppressed while a pointer button is down or a window drag is active (including macOS
+    Accessibility "Three Finger Drag")
 
 Back-and-forth                                             // ws.back-and-forth
 ├── Option+Tab / ctl back-and-forth -> the workspace focused before this one, on any display
@@ -39,11 +42,23 @@ Move window without switching                              // ws.move-window
 │   size and relative place); focus follows it and Option+Tab goes back
 ├── Target hidden on another display -> parked off the edge of the display it is on; its recovery
 │   frame moves onto the target's display, so showing the workspace brings it up there
-└── ctl move-app <bundle-id> <ws>     -> every current window of that app
+└── ctl move-app <bundle-id> <ws>     -> every current window of that app, tiled or floating, in one request
+
+Mouse follows focus ([settings] mouse_follows_focus)       // ws.mouse-follows-focus
+├── "off" (default) -> never moves the pointer
+├── "display"       -> on explicit keyboard/ctl focus changes (switch, back-and-forth,
+│                      move-workspace, focus, move onto an active workspace), if the pointer is not
+│                      already on the target display, warps to the center of the focused window (or
+│                      the target display when empty)
+├── "window"        -> same explicit triggers, warping whenever the pointer is outside the newly
+│                      focused window (or empty display)
+└── Never warps on passive cycles, focus-follow, Cmd+Tab, mouse clicks, swipes, drags, or while a
+    mouse button is held; re-associates mouse movement immediately after warping
 
 Focus follows                                              // ws.focus-follow
 ├── Focusing a window that lives on a hidden workspace (Dock, Cmd+Tab, notification)
-│   -> that workspace becomes active
+│   -> that workspace becomes active, with focus on that window (not its remembered tile)
+│   └── Switch interrupted by that same activation -> the next cycle follows it again
 ├── Focusing a window on another display's visible workspace -> no switch; Option+Tab remembers it
 └── No focused window reported -> follows the frontmost app only when all its windows, tiled
     or floating, are on one workspace
@@ -68,7 +83,9 @@ Displays                                                    // ws.displays
 │   saved UUID renders back as that display's name
 ├── Preferred display unplugged -> its workspaces fall back to main, return on reconnect; its
 │   saved assignment keeps a Disconnected displays card with the picker on Not connected
-└── Display added or removed -> hidden windows re-parked against the new displays
+└── Display added or removed -> hidden windows re-parked against the new displays; visible owned
+    windows left with their center off every remaining display keep their slots and snap back onto
+    their workspace's display
 
 Workspace HUD ([settings] hud, on by default)               // ws.hud
 ├── A switch, a window moved to another workspace, a split-axis or Fullscreen Layout toggle
@@ -86,7 +103,6 @@ Workspace HUD ([settings] hud, on by default)               // ws.hud
 │   ├── Hover over the capsule -> pauses auto-dismiss (and rescues a mid-exit capsule); resumes
 │   │   0.6 s after the pointer leaves
 │   ├── Click a workspace slot -> switches that display to that workspace without activating
-│   ├── Trailing Settings gear -> opens Spaceman Settings and glides the capsule out
 │   └── Right-click (or Ctrl+click) an app icon -> native Float/Tile and Pin/Unpin menu writing
 │       through config.toml rules
 ├── Another switch while it's up, or on its way out -> the same capsule carries on from where it
@@ -132,19 +148,32 @@ on the same letter.
   layout, hide), `switch_keeps_outgoing_visible_when_incoming_reveal_never_arrives`
   (`reliability.rs`, rollback), `moving_to_an_inactive_workspace_does_not_switch`,
   `focusing_a_parked_window_activates_its_workspace`,
+  `following_focus_to_a_hidden_workspace_keeps_the_window_that_took_it`,
+  `a_follow_cancelled_by_the_activation_it_answers_follows_on_the_next_cycle` and
+  `a_follow_that_fails_while_an_activation_cancels_stays_suppressed` (`focus.rs`, notification
+  clicks),
   `workspace_back_and_forth_bounces_between_the_last_two_focused_workspaces`,
   `workspace_back_and_forth_on_one_display_switches_like_before`,
   `switching_to_an_unconfigured_named_workspace_is_rejected`.
 - Unit (FakeBackend), `src/app/tests/cross_display.rs`: moving a window to a workspace on
   another display, on screen (tiled, floating, focus history) or hidden (parked on its own display
   even when a write off the other display's edge is refused, shown on the target display later,
-  left where it was when it cannot be parked). Unit, `src/macos/apply.rs`: a refused size write
+  left where it was when it cannot be parked), dragged floats parking off their actual display on
+  switch or move (issue 148) and relocating from a third display onto the target display (issue
+  152), and `move_app_moves_every_managed_window_of_the_app` (issue 121) and
+  `move_app_moves_floating_windows_too` (issue 136). Unit, `src/macos/apply.rs`: a refused size write
   before a move no longer stops the move; focusing raises the window before bringing its app
   forward, and either `AXFrontmost` or AppKit activation brings the app forward (issue 92).
 - Unit (FakeBackend), `src/app/tests/focus.rs`:
   `a_workspace_switch_that_cannot_focus_keeps_the_focus_restore_pending`,
-  `a_workspace_switch_that_focuses_settles_the_focus_restore`. Whether keys really land in the
-  incoming app on macOS 14 and later is not covered by a test.
+  `a_workspace_switch_that_focuses_settles_the_focus_restore`,
+  `reselecting_the_active_split_workspace_keeps_the_focused_tile` (issue 120),
+  `leaving_with_a_float_focused_keeps_the_remembered_tile` (`float.rs`, issue 138), and the `mouse_follows_focus_*`
+  tests covering `off` / `display` / `window`, empty-display centering, same-display and
+  in-window skips, `move-workspace` / `move`, passive `cycle()` focus-follow suppression, and
+  `mouse_down` guarding (plus `warp_reassociates_immediately_after_warping_and_skips_while_mouse_is_down`
+  in `src/macos/apply.rs`). Whether keys really land in the incoming app on macOS 14 and later,
+  and live `CGWarpMouseCursorPosition` behavior on hardware displays, are not covered by a test.
 - Unit (FakeBackend), `src/app/tests/move_workspace.rs`:
   `move_workspace_to_occupied_display_promotes_source_previous_and_parks_displaced`,
   `option_tab_after_moving_the_focused_workspace_never_reveals_the_displaced_one` (issue 76),
@@ -178,9 +207,11 @@ on the same letter.
   `status_menu_lists_each_displays_visible_and_occupied_workspaces` (menu rows per display, checks,
   app order). The AppKit rows themselves (icons, tooltip of app names) are not covered.
 - Unit: `swipes_step_through_the_occupied_workspaces_of_the_display_under_the_pointer`
-  (`src/app/tests/switching.rs`) and the recognizer in `src/swipe.rs` (fires once per swipe; ignores
-  short, vertical and four-finger swipes). The event tap itself (`src/macos/swipes.rs`) is not
-  covered.
+  (`src/app/tests/switching.rs`), the recognizer in `src/swipe.rs` (fires once per swipe; ignores
+  short, vertical and four-finger swipes), pointer-button / three-finger-drag suppression in
+  `src/macos/swipes.rs` and `src/app/input.rs` (issue 151), and visible stranded-window recovery
+  after display disconnect in `src/app/tests/display_disconnect.rs` (issue 150). Live CGEventTap
+  callback delivery in `src/macos/swipes.rs` is not covered.
 - Unit (FakeBackend), `src/app/tests/rule_reload.rs`: live rule reloads
   (`adding_or_changing_route_rule_moves_open_windows_live_and_populates_target_workspace`,
   `changing_route_rule_to_named_workspace_enables_it_and_moves_open_window`,
@@ -195,7 +226,10 @@ on the same letter.
   `unrelated_rule_reload_preserves_manually_moved_windows`,
   `ignoring_a_hidden_parked_window_restores_and_releases_it`,
   `rule_reload_retries_only_failed_or_unavailable_windows`), `src/app/tests/cross_display.rs`
-  (`reassigning_workspace_display_via_config_relocates_recovery_frames_and_parks_safely`).
+  (`reassigning_workspace_display_via_config_relocates_recovery_frames_and_parks_safely`), and
+  `src/app/tests/scratchpad.rs`
+  (`rule_reload_and_initial_routing_leave_hidden_scratchpad_windows_alone`,
+  `rule_reload_leaves_shown_scratchpad_windows_alone`).
 - Unit (FakeBackend), `src/app/tests/rules.rs` & `src/app/tests/reconciliation.rs`: adoption order
   (`bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace`,
   `title_route_rule_routes_matching_secondary_window`,
@@ -260,9 +294,9 @@ on the same letter.
   unknown). A listen-only key tap sees an Option shortcut Carbon didn't take; after 750 ms the agent
   logs `hotkey: <name> pressed but macOS did not deliver it`, registers every shortcut again (at
   most every 5 s) and runs the missed action. Each delivered press logs `hotkey: <name>`.
-- Config edits (rules, display assignments, named-workspace shortcuts, and HUD settings) reload
-  automatically without restarting; Settings › Rules, Workspaces, and Layout retile immediately, and
-  `ctl restart` exits without relaunching.
+- Config edits (rules, `[shortcuts]`, `[labs]`, display assignments, named-workspace shortcuts, and
+  HUD settings) reload automatically without restarting; Settings › Rules, Workspaces, Shortcuts,
+  and Layout apply immediately, and `ctl restart` exits without relaunching.
 - The HUD's first appearance after launch only fades in: its panel has drawn nothing yet for the
   capsule to rise from. Every later one enters with the full motion.
 - Try the HUD's motion without switching workspaces in the Playground (`⇧⌘D`, HUD > hud-switch):

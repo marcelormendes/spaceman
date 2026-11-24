@@ -956,7 +956,7 @@ export function renderBounceHtml(
           var body = raw.trim();
           if (body.toLowerCase().indexOf("spaceman://") === 0) body = body.slice(11);
           else if (body.indexOf("://") !== -1 || body.indexOf(":") !== -1) return null;
-          body = body.split("#")[0].split("?")[0].replace(/^\/+|\/+$/g, "");
+          body = body.split("#")[0].split("?")[0].replace(/^\\/+|\\/+$/g, "");
           if (!body) return null;
           var parts = body.split("/").map(function (s) { return s.toLowerCase(); });
           if (parts.length > 3) return null;

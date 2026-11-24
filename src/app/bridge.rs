@@ -48,7 +48,7 @@ impl From<UiAction> for Action {
             UiAction::ToggleLaunchAtLogin => Self::ToggleLaunchAtLogin,
             UiAction::SetHud(enabled) => Self::SetHud(enabled),
             UiAction::SwitchWorkspace(workspace) => {
-                Self::Worker(WorkerAction::SwitchWorkspace(workspace))
+                Self::Worker(WorkerAction::SelectWorkspace(workspace))
             }
             UiAction::Retile => Self::Worker(WorkerAction::Retile),
             UiAction::MarkWrong => Self::Worker(WorkerAction::MarkWrong),
@@ -247,7 +247,7 @@ pub struct UiAgentSnapshot {
 impl UiAgentSnapshot {
     pub(super) fn to_settings_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::updater::build_version(),
             "accessibility": self.accessibility,
             "automatic": self.automatic,
             "hud": self.hud,
@@ -442,7 +442,7 @@ mod tests {
         bridge.send(UiAction::SwitchWorkspace(WorkspaceId::THREE));
         assert_eq!(
             receiver.try_recv().ok(),
-            Some(Action::Worker(WorkerAction::SwitchWorkspace(
+            Some(Action::Worker(WorkerAction::SelectWorkspace(
                 WorkspaceId::THREE
             )))
         );

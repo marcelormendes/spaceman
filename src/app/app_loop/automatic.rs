@@ -145,7 +145,7 @@ impl MainThreadAgent {
         if !layout_changed {
             return;
         }
-        match HotkeyPlan::current(&self.hotkey_workspaces) {
+        match HotkeyPlan::current(&self.hotkey_workspaces, &self.shortcuts) {
             // Resolve and validate while old registrations remain active. Carbon
             // cannot register the replacement chords until those are released.
             Ok(plan)

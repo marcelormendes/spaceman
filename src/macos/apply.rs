@@ -7,7 +7,7 @@ use std::{
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::{NSApplicationActivationOptions, NSApplicationActivationPolicy};
 use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::{CFArray, CFBoolean, CFRetained, CFString};
+use objc2_core_foundation::{CFArray, CFBoolean, CFRetained, CFString, CGPoint};
 use objc2_core_graphics::CGWindowID;
 
 use crate::{AppInstanceId, PhysicalWindowId, Placement, Rect, Settings};
@@ -252,6 +252,46 @@ pub(super) fn position_matches(actual: Rect, target: Rect) -> bool {
 }
 
 const POSITION_CONFIRM_TOLERANCE: i32 = 64;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
+    fn CGAssociateMouseAndMouseCursorPosition(connected: libc::boolean_t) -> i32;
+}
+
+/// Move the mouse pointer to `point` in global display coordinates and
+/// immediately re-associate mouse movement so macOS does not suppress real
+/// input for 250 ms afterwards. Never warps while a mouse button is held.
+#[must_use]
+pub fn warp_pointer(point: (i32, i32)) -> bool {
+    let target = CGPoint::new(f64::from(point.0), f64::from(point.1));
+    warp_sequence(
+        mouse_down,
+        || {
+            // SAFETY: `CGWarpMouseCursorPosition` takes a plain `CGPoint` by
+            // value and does not retain pointers or require AppKit main-thread state.
+            unsafe { CGWarpMouseCursorPosition(target) == 0 }
+        },
+        || {
+            // SAFETY: `CGAssociateMouseAndMouseCursorPosition` takes a plain
+            // `boolean_t` (`1` for true) to re-enable mouse-to-cursor coupling.
+            let _: i32 = unsafe { CGAssociateMouseAndMouseCursorPosition(1) };
+        },
+    )
+}
+
+fn warp_sequence(
+    is_mouse_down: impl FnOnce() -> bool,
+    warp: impl FnOnce() -> bool,
+    reassociate: impl FnOnce(),
+) -> bool {
+    if is_mouse_down() {
+        return false;
+    }
+    let warped = warp();
+    reassociate();
+    warped
+}
 
 /// Focus a window in another app from the background.
 ///
@@ -547,7 +587,7 @@ mod tests {
 
     use objc2_application_services::AXError;
 
-    use super::{focus_sequence, write_frame};
+    use super::{focus_sequence, warp_sequence, write_frame};
 
     #[test]
     fn focus_raises_the_window_before_bringing_its_app_forward() {
@@ -621,5 +661,29 @@ mod tests {
             || sizes.borrow_mut().pop().unwrap(),
             || AXError::Success
         ));
+    }
+
+    #[test]
+    fn warp_reassociates_immediately_after_warping_and_skips_while_mouse_is_down() {
+        let calls = RefCell::new(Vec::new());
+        assert!(!warp_sequence(
+            || true,
+            || {
+                calls.borrow_mut().push("warp");
+                true
+            },
+            || calls.borrow_mut().push("reassociate"),
+        ));
+        assert!(calls.borrow().is_empty());
+
+        assert!(warp_sequence(
+            || false,
+            || {
+                calls.borrow_mut().push("warp");
+                true
+            },
+            || calls.borrow_mut().push("reassociate"),
+        ));
+        assert_eq!(*calls.borrow(), ["warp", "reassociate"]);
     }
 }

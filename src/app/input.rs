@@ -23,6 +23,17 @@ pub(super) fn is_window_resize(start: Rect, current: Rect) -> bool {
         >= 6
 }
 
+/// Whether a three-finger workspace swipe must be ignored because a pointer
+/// button is down or a window drag/resize gesture is in progress (such as
+/// macOS Accessibility "Three Finger Drag").
+pub(super) fn should_ignore_swipe(
+    mouse_down: bool,
+    mouse_was_down: bool,
+    gesture_active: bool,
+) -> bool {
+    mouse_down || mouse_was_down || gesture_active
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum QueuedInput {
     Action(WorkerAction),
@@ -331,5 +342,61 @@ mod tests {
             .unwrap();
         queue.clear();
         assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn three_finger_swipes_are_ignored_while_a_pointer_button_or_drag_is_active() {
+        let mut tracker = GestureTracker::default();
+        // Normal three-finger swipe: no mouse button down, no active gesture.
+        assert!(!should_ignore_swipe(
+            false,
+            false,
+            tracker.window().is_some()
+        ));
+
+        // Left button pressed (e.g. macOS Three Finger Drag starts dragging a window).
+        assert!(should_ignore_swipe(true, false, tracker.window().is_some()));
+
+        // Active window drag tracked in GestureTracker suppresses swipes even
+        // on the boundary tick where mouse_down just transitioned.
+        tracker.begin(Some((window(), start())));
+        assert!(should_ignore_swipe(true, true, tracker.window().is_some()));
+        assert!(should_ignore_swipe(false, true, tracker.window().is_some()));
+        assert!(should_ignore_swipe(
+            false,
+            false,
+            tracker.window().is_some()
+        ));
+
+        // Finishing the drag clears GestureTracker so subsequent normal
+        // three-finger swipes are accepted again.
+        let moved = Rect { x: 200, ..start() };
+        assert_eq!(
+            tracker.finish(Some(moved), Some((260, 40))),
+            Some(FinalGesture::Drop(window(), (260, 40)))
+        );
+        assert!(!should_ignore_swipe(
+            false,
+            false,
+            tracker.window().is_some()
+        ));
+    }
+
+    #[test]
+    fn suppressed_swipes_never_enter_the_input_queue_while_normal_swipes_do() {
+        let mut queue = InputQueue::default();
+        let swipe = WorkerAction::Swipe(crate::swipe::Swipe::Right, (200, 100));
+
+        // While dragging with three fingers (mouse_down = true), a swipe is dropped.
+        if !should_ignore_swipe(true, true, true) {
+            queue.push(QueuedInput::Action(swipe.clone())).unwrap();
+        }
+        assert!(queue.is_empty());
+
+        // Ordinary three-finger swipe with no drag in progress is queued normally.
+        if !should_ignore_swipe(false, false, false) {
+            queue.push(QueuedInput::Action(swipe.clone())).unwrap();
+        }
+        assert_eq!(queue.pop(), Some(QueuedInput::Action(swipe)));
     }
 }

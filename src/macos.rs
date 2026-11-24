@@ -29,7 +29,7 @@ use crate::{
 
 pub use apply::{
     ApplyOutcome, ApplyResult, WindowAccessError, apply, apply_managed, apply_while, focus_window,
-    frame, raise_window, set_position_only,
+    frame, raise_window, set_position_only, warp_pointer,
 };
 pub use ax::{
     onscreen_window_frames, onscreen_window_order, window_at_point, window_server_frame,

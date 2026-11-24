@@ -21,10 +21,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use rune::{
-    Color, Cursor, El, Pixels, Spring, Transition, Tx, el, icon, row, text,
-    tok::motion::pair::SETTLE,
-};
+use rune::{Color, El, Pixels, Spring, Transition, el, row, text, tok::motion::pair::SETTLE};
 use spaceman::{
     WorkspaceId,
     app::{UiHudDisplay, UiHudWorkspace},
@@ -41,10 +38,6 @@ pub const INNER: f32 = PILL_HEIGHT - 2.0;
 pub const SHADOW_REACH: f32 = 48.0;
 /// Room each side of the capsule for its shadow's widest blur.
 pub const SHADOW_SIDE: f32 = 32.0;
-/// Trailing space inside the capsule for the hairline divider and concentric 30×30 Settings gear.
-pub const GEAR_SLOT_W: f32 = 42.0;
-const GEAR_SIZE: f32 = 30.0;
-const GEAR_INSET: f32 = (INNER - GEAR_SIZE) / 2.0;
 
 /// The capsule answering a shortcut: crisp in, faster out.
 const ENTER: Spring = Spring::new(0.14, 0.0);
@@ -77,8 +70,6 @@ pub struct HudView<'a> {
     pub focus: Option<WorkspaceId>,
     /// Reduce Motion: it fades where it rests, with no scale or drop to land in one frame.
     pub still: bool,
-    /// Pointer is hovering the pill or a context menu is open: warm subtle interactive chrome.
-    pub active: bool,
     /// Empty workspaces visited during this HUD show, kept in the row until it hides so rapid
     /// flicks across empty workspaces never wobble the capsule width underneath the marker.
     pub visited_empty: &'a BTreeSet<WorkspaceId>,
@@ -121,7 +112,7 @@ pub struct Track {
 /// The widest the row gets before it scrolls, for a panel `panel_width` wide.
 #[must_use]
 pub fn max_row_width(panel_width: f32) -> f32 {
-    panel_width - 2.0 * SHADOW_SIDE - 2.0 - GEAR_SLOT_W
+    panel_width - 2.0 * SHADOW_SIDE - 2.0
 }
 
 /// Passive capsule used by Playground previews (no `HudOverlay` event handlers).
@@ -130,8 +121,8 @@ pub fn slot(view: &HudView, style: HudStyle, icons: &Icons, panel_width: f32, p:
 }
 
 /// Interactive capsule used by the live HUD overlay and its 120 Hz tests: marks the capsule as a
-/// hit region, holds on hover, switches workspaces on click, opens Settings from the trailing
-/// gear, and opens the per-app Float/Pin menu on secondary click.
+/// hit region, holds on hover, switches workspaces on click, and opens the per-app Float/Pin menu
+/// on secondary click.
 pub fn interactive_slot(
     view: &HudView,
     style: HudStyle,
@@ -234,15 +225,14 @@ fn capsule(view: &HudView, track: Track, max_width: f32, p: Paint, interactive: 
         .child(content.children(track.cells));
     let mut capsule = row()
         .key("hud-pill")
-        .w(width + GEAR_SLOT_W + 2.0)
+        .w(width + 2.0)
         .h(PILL_HEIGHT)
         .center()
         .radius(PILL_HEIGHT / 2.0)
         .fill(srgb(0x161618))
         .border(p.hair, srgb(0x303036))
         .motion(ROW)
-        .child(viewport)
-        .child(settings_gear(view.active, p, interactive));
+        .child(viewport);
     if interactive {
         capsule = capsule
             .hit()
@@ -258,47 +248,6 @@ fn capsule(view: &HudView, track: Track, max_width: f32, p: Paint, interactive: 
         capsule = capsule.box_shadow(*shadow);
     }
     capsule
-}
-
-/// Subtle, concentric Settings gear at the trailing end of the capsule: whisper-quiet at rest
-/// and warming cleanly when the pointer hovers the pill.
-fn settings_gear(active: bool, p: Paint, interactive: bool) -> El {
-    let sep = el()
-        .key("hud-settings-sep")
-        .w(p.hair)
-        .h(16.0)
-        .fill(rgba(0xffffff, if active { 0.14 } else { 0.08 }));
-    let mut button = row()
-        .key("hud-settings")
-        .size(GEAR_SIZE, GEAR_SIZE)
-        .radius(GEAR_SIZE / 2.0)
-        .center()
-        .child(
-            icon(&rune_theme_opencode::icons::SETTINGS_GEAR, 14.0)
-                .key("icon")
-                .color(rgba(0xffffff, if active { 0.72 } else { 0.30 })),
-        );
-    if interactive {
-        button = button
-            .role("button")
-            .label("Open Spaceman Settings")
-            .cursor(Cursor::Pointer)
-            .hover(rgba(0xffffff, 0.10))
-            .press(rgba(0xffffff, 0.16))
-            .on_press_tx(|overlay: &mut super::HudOverlay, tx: &mut Tx| {
-                overlay.open_settings(tx);
-            });
-    }
-    row()
-        .key("hud-settings-slot")
-        .w(GEAR_SLOT_W)
-        .h(INNER)
-        .pr(GEAR_INSET)
-        .center_y()
-        .justify_end()
-        .gap(5.0)
-        .child(sep)
-        .child(button)
 }
 
 /// How a workspace joins or leaves the row: in place, with a fade and a little scale.

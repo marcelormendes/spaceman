@@ -166,8 +166,14 @@ fn run_doctor(hours: Option<u64>) -> Result<String, String> {
         ));
     }
     let now = spaceman::journal::unix_millis();
-    let since = hours.map_or(0, |hours| now.saturating_sub(hours * 3_600_000));
+    let since = doctor_since(now, hours);
     Ok(spaceman::journal::summarize(&lines, since, now, skipped))
+}
+
+fn doctor_since(now: u64, hours: Option<u64>) -> u64 {
+    hours.map_or(0, |hours| {
+        now.saturating_sub(hours.saturating_mul(3_600_000))
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -568,4 +574,18 @@ fn run_replay(path: &str) -> Result<ReplayOutput, String> {
     }
 
     Ok(ReplayOutput { steps })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::doctor_since;
+
+    #[test]
+    fn doctor_since_saturates_extreme_hour_counts_instead_of_overflowing() {
+        let now = 1_795_500_000_000;
+        assert_eq!(doctor_since(now, None), 0);
+        assert_eq!(doctor_since(now, Some(1)), now - 3_600_000);
+        assert_eq!(doctor_since(now, Some(144_115_188_075_855_872)), 0);
+        assert_eq!(doctor_since(now, Some(u64::MAX)), 0);
+    }
 }

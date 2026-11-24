@@ -242,18 +242,21 @@ fn selecting_an_active_workspace_focuses_its_window() {
 }
 
 #[test]
-fn selecting_an_active_split_workspace_restores_its_remembered_focus() {
+fn selecting_an_active_split_workspace_from_elsewhere_restores_its_remembered_focus() {
     let first = window(10);
     let remembered = window(20);
+    let elsewhere = window(30);
     let mut backend = FakeBackend {
-        focused: Some(first.clone()),
+        focused: Some(elsewhere.clone()),
         ..FakeBackend::default()
     };
     backend.frames.insert(first.clone(), frame(50));
     backend.frames.insert(remembered.clone(), frame(500));
+    backend.frames.insert(elsewhere.clone(), frame(1050));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &first);
     bind(&mut runtime, WorkspaceId::ONE, &remembered);
+    bind(&mut runtime, WorkspaceId::SIX, &elsewhere);
     runtime
         .workspaces
         .remember_focus(WorkspaceId::ONE, &remembered);

@@ -19,6 +19,11 @@ pub const SIDEBAR_WIDTH: f32 = 220.0;
 pub const PANEL_INSET: f32 = 8.0;
 pub const HEADER_HEIGHT: f32 = 56.0;
 pub const CONTENT_PADDING: f32 = 24.0;
+/// How far a pane body's content dissolves as it scrolls under the header (top) and off the
+/// panel's foot (bottom), as Hex's list-and-detail panes do. Resting content sits clear of both.
+const SCROLL_FADE: (f32, f32) = (18.0, 28.0);
+/// The gap between the header and a pane's first row at rest.
+const REST_TOP: f32 = 4.0;
 
 pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     let p = Paint::new(cx.system_dark(), cx.env().scale);
@@ -74,7 +79,7 @@ fn sidebar(ui: &Ui, p: Paint) -> El {
         .child(nav)
         .child(el().key("spacer").grow(1.0))
         .child(
-            text(format!("Version {}", env!("CARGO_PKG_VERSION")))
+            text(format!("Version {}", spaceman::build_version()))
                 .key("version")
                 .font(p.k.ty.small)
                 .color(p.faint())
@@ -193,13 +198,19 @@ fn error_banner(ui: &Ui, p: Paint) -> Option<El> {
     )
 }
 
-/// A vertically scrolling pane body.
+/// A vertically scrolling pane body whose content fades out under the header and at the
+/// panel's foot instead of clipping on a straight line. The body reaches up under the header by
+/// the fade's extra height, and its inset matches the fade, so resting content keeps its place
+/// and only content scrolled into either edge dissolves.
 pub fn scroll_body(key: &str, content: El) -> El {
+    let (top, bottom) = SCROLL_FADE;
     col()
         .key(key)
         .grow(1.0)
         .shrink()
-        .clip_fade(0.0, 4.0, 0.0, 24.0)
+        .min_h(0.0)
+        .mt(REST_TOP - top)
+        .clip_fade(0.0, top, 0.0, bottom)
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
@@ -207,8 +218,8 @@ pub fn scroll_body(key: &str, content: El) -> El {
             col()
                 .key("inset")
                 .px(CONTENT_PADDING)
-                .pt(4.0)
-                .pb(24.0)
+                .pt(top)
+                .pb(bottom)
                 .child(content),
         )
 }

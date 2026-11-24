@@ -38,6 +38,35 @@ impl Omission {
 }
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
+    /// An owned float that a Complete Accessibility snapshot omitted while the
+    /// window server still shows it on screen keeps its workspace until the
+    /// omission outlasts [`OMISSION_SETTLE`], like a bound tile does (#179).
+    /// `onscreen` caches the window-server read for the rest of the cycle.
+    pub(super) fn omitted_float_is_settling(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        onscreen: &mut Option<Option<HashMap<u32, crate::Rect>>>,
+    ) -> bool {
+        let frames = onscreen.get_or_insert_with(|| self.backend.onscreen_window_frames());
+        if !frames
+            .as_ref()
+            .is_some_and(|frames| frames.contains_key(&window.window_id))
+        {
+            return false;
+        }
+        let now = Instant::now();
+        self.omitted_windows
+            .entry(window.clone())
+            .or_insert_with(|| {
+                log_event!(
+                    "observation omitted floating {:?}: window server shows it on screen; keeping its workspace",
+                    window
+                );
+                Omission::new(now)
+            })
+            .is_settling(now)
+    }
+
     pub(super) fn ordered_out_window_is_settling(
         &mut self,
         workspace: WorkspaceId,

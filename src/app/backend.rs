@@ -59,6 +59,15 @@ pub(super) trait WorkspaceBackend {
     }
     fn raise_window(&mut self, window: &crate::PhysicalWindowId) -> bool;
     fn focus_window(&mut self, window: &crate::PhysicalWindowId) -> bool;
+    fn pointer_location(&mut self) -> Option<(i32, i32)> {
+        None
+    }
+    fn mouse_down(&mut self) -> bool {
+        false
+    }
+    fn warp_pointer(&mut self, _point: (i32, i32)) -> bool {
+        false
+    }
     fn apply_managed(
         &mut self,
         placements: &[crate::Placement],
@@ -190,6 +199,18 @@ impl WorkspaceBackend for MacWorkspaceBackend {
 
     fn focus_window(&mut self, window: &crate::PhysicalWindowId) -> bool {
         macos::focus_window(window)
+    }
+
+    fn pointer_location(&mut self) -> Option<(i32, i32)> {
+        macos::mouse_position()
+    }
+
+    fn mouse_down(&mut self) -> bool {
+        macos::mouse_down()
+    }
+
+    fn warp_pointer(&mut self, point: (i32, i32)) -> bool {
+        macos::warp_pointer(point)
     }
 
     fn apply_managed(

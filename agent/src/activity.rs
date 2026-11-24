@@ -261,7 +261,7 @@ impl ActivityPane {
             JournalLine {
                 t: at(3_400),
                 event: JournalEvent::Start {
-                    version: env!("CARGO_PKG_VERSION").into(),
+                    version: spaceman::build_version().into(),
                     pid: 4120,
                     restored_state: true,
                     slots: 6,

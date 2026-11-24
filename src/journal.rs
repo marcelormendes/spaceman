@@ -295,7 +295,9 @@ impl AnomalyKind {
             Self::Stranded => "off screen although its workspace is visible",
             Self::ParkedVisible => "marked hidden but on screen",
             Self::Unadopted => "on screen but owned by no workspace",
-            Self::ConstrainedOverlap => "constrained_overlap",
+            Self::ConstrainedOverlap => {
+                "a tile that resisted resizing overlaps another visible tile on its workspace"
+            }
             Self::Misplaced => "not where its layout puts it",
             Self::Missing => "owned but gone from the window server",
             Self::ParkingExempt => "stopped hiding after repeatedly un-parking itself",

@@ -44,7 +44,11 @@ impl<'a> Summary<'a> {
     pub fn new(lines: &'a [JournalLine], since_ms: u64, now_ms: u64) -> Self {
         let mut summary = Self::default();
         let mut open: HashMap<(AnomalyKind, u32), u64> = HashMap::new();
-        for line in lines.iter().filter(|line| line.t >= since_ms) {
+        for line in lines {
+            if line.t < since_ms {
+                apply_arrangement(&mut summary.arrangement, &line.event);
+                continue;
+            }
             summary.lines.push(line);
             match &line.event {
                 JournalEvent::Start { .. } => {
@@ -90,9 +94,7 @@ impl<'a> Summary<'a> {
                             open.insert(key, line.t);
                         }
                         AnomalyState::End => {
-                            if open.remove(&key).is_some()
-                                || summary.anomalies.contains_key(&anomaly.kind)
-                            {
+                            if open.remove(&key).is_some() {
                                 let kind = summary.anomalies.entry(anomaly.kind).or_default();
                                 let duration = duration_ms.unwrap_or_default();
                                 kind.total_ms += duration;
@@ -101,17 +103,8 @@ impl<'a> Summary<'a> {
                         }
                     }
                 }
-                JournalEvent::Snapshot { arrangement } => {
-                    summary.arrangement = Some(arrangement.clone());
-                }
-                JournalEvent::Diff {
-                    active,
-                    displays,
-                    changes,
-                } => {
-                    if let Some(current) = summary.arrangement.as_mut() {
-                        apply_diff(current, active.as_ref(), displays.as_ref(), changes);
-                    }
+                JournalEvent::Snapshot { .. } | JournalEvent::Diff { .. } => {
+                    apply_arrangement(&mut summary.arrangement, &line.event);
                 }
                 JournalEvent::MarkedWrong => summary.marked.push(line.t),
                 JournalEvent::Remembered { .. } => {}
@@ -163,7 +156,15 @@ impl<'a> Summary<'a> {
 pub fn summarize(lines: &[JournalLine], since_ms: u64, now_ms: u64, skipped: usize) -> String {
     let summary = Summary::new(lines, since_ms, now_ms);
     let (Some(first), Some(last)) = (summary.lines.first(), summary.lines.last()) else {
-        return "No journal events in this period.".into();
+        let mut out = "No journal events in this period.".to_owned();
+        if skipped > 0 {
+            out.push_str(&format!(" ({skipped} unreadable lines skipped)"));
+        }
+        if let Some(arrangement) = &summary.arrangement {
+            out.push('\n');
+            append_arrangement(&mut out, arrangement);
+        }
+        return out.trim_end().to_owned();
     };
     let mut out = format!(
         "{} events from {} to {}",
@@ -290,32 +291,36 @@ pub fn summarize(lines: &[JournalLine], since_ms: u64, now_ms: u64, skipped: usi
     }
 
     if let Some(arrangement) = &summary.arrangement {
-        out.push_str(&format!(
-            "\nLast known arrangement: active {}\n",
-            arrangement
-                .active
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        let mut workspaces: BTreeMap<WorkspaceId, Vec<&ArrangedWindow>> = BTreeMap::new();
-        let mut loose = Vec::new();
-        for window in &arrangement.windows {
-            match window.owner {
-                Some(owner) => workspaces.entry(owner).or_default().push(window),
-                None if window.role == WindowRole::Unowned => loose.push(window),
-                None => {}
-            }
-        }
-        for (workspace, windows) in workspaces {
-            out.push_str(&format!("  {workspace}: {}\n", describe(&windows)));
-        }
-        if !loose.is_empty() {
-            out.push_str(&format!("  unowned: {}\n", describe(&loose)));
-        }
+        append_arrangement(&mut out, arrangement);
     }
     out.trim_end().to_owned()
+}
+
+fn append_arrangement(out: &mut String, arrangement: &Arrangement) {
+    out.push_str(&format!(
+        "\nLast known arrangement: active {}\n",
+        arrangement
+            .active
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    let mut workspaces: BTreeMap<WorkspaceId, Vec<&ArrangedWindow>> = BTreeMap::new();
+    let mut loose = Vec::new();
+    for window in &arrangement.windows {
+        match window.owner {
+            Some(owner) => workspaces.entry(owner).or_default().push(window),
+            None if window.role == WindowRole::Unowned => loose.push(window),
+            None => {}
+        }
+    }
+    for (workspace, windows) in workspaces {
+        out.push_str(&format!("  {workspace}: {}\n", describe(&windows)));
+    }
+    if !loose.is_empty() {
+        out.push_str(&format!("  unowned: {}\n", describe(&loose)));
+    }
 }
 
 /// The four most frequent bundles, most frequent first: `a (3), b (1)`.
@@ -328,6 +333,24 @@ fn top_bundles<'a>(bundles: impl Iterator<Item = (&'a str, usize)>) -> String {
         .map(|(bundle, count)| format!("{bundle} ({count})"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn apply_arrangement(arrangement: &mut Option<Arrangement>, event: &JournalEvent) {
+    match event {
+        JournalEvent::Snapshot {
+            arrangement: snapshot,
+        } => *arrangement = Some(snapshot.clone()),
+        JournalEvent::Diff {
+            active,
+            displays,
+            changes,
+        } => {
+            if let Some(current) = arrangement.as_mut() {
+                apply_diff(current, active.as_ref(), displays.as_ref(), changes);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn apply_diff(

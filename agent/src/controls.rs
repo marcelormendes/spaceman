@@ -7,7 +7,7 @@ use rune::{
     Beat, Color, Easing, Edge, El, Icon, LoopSpec, Sequence, Shadow, Spring, SpringPair, TextStyle,
     Transition, Tx, col, el, icon, row, text,
 };
-use rune_kit::{Button, ButtonVariant, ControlSize, Keybind, Kit, Switch};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Switch};
 
 use crate::{Ui, apps::App};
 
@@ -276,24 +276,6 @@ pub fn status_dot(color: Color) -> El {
 
 pub fn pulsing_dot(color: Color) -> El {
     status_dot(color).looping(PULSE)
-}
-
-/// Read-only shortcut rows with `or` separators between alternative chord combos.
-pub fn shortcut_rows(p: Paint, key_prefix: &str, shortcuts: &[(&str, &[&[&str]])]) -> Vec<El> {
-    shortcuts
-        .iter()
-        .enumerate()
-        .map(|(index, (title, combos))| {
-            let mut keys = row().key("keys").gap(6.0).center_y();
-            for (n, combo) in combos.iter().enumerate() {
-                if n > 0 {
-                    keys = keys.child(text("or").font(p.k.ty.small).color(p.faint()));
-                }
-                keys = keys.child(Keybind::new(combo).build(p.k));
-            }
-            setting_row(p, &format!("{key_prefix}-{index}"), title, None, keys)
-        })
-        .collect()
 }
 
 /// An app's Finder icon at `size`, or its initial in a rounded square when unavailable.

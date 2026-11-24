@@ -81,7 +81,7 @@ objc2::define_class!(
         fn switch_workspace(&self, sender: &NSMenuItem) {
             if let Ok(index) = usize::try_from(sender.tag()) {
                 drop(self.ivars().actions.send(Action::Worker(
-                    WorkerAction::SwitchWorkspace(WorkspaceId::from_index(index)),
+                    WorkerAction::SelectWorkspace(WorkspaceId::from_index(index)),
                 )));
             }
         }

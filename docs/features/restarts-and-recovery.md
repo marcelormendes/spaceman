@@ -37,6 +37,7 @@ Placement recall (reboot, fresh start, or app relaunch)     // recover.memory
 │   remembered placements
 │   ├── recall closes early once every placement is claimed or the app quits
 │   ├── frame match (8 px) first, then creation order
+│   ├── a placement saved floating floats again (keeps its frame) until Toggle Float tiles it
 │   ├── route/ignore rules win; disabled/unmanaged workspaces skipped
 │   └── apps launched after the startup window open on the active workspace
 ├── An app relaunched mid-session (an update or restart) recalls its placements too: its new
@@ -89,7 +90,8 @@ See [Recovery](../recovery.md) for the safe manual procedure; never delete `park
 - Unit (FakeBackend), `memory.rs`: startup recall by frame then order, no recall for instances that
   already own windows, route precedence, recall expiry, recall closing when the app quits,
   mid-session launches opening on the active workspace, mid-session relaunches (quit first or
-  start first) returning to their workspace, and settle-before-record. Pure tests in
+  start first) returning to their workspace, floating placements staying floating
+  (`a_recalled_floating_placement_keeps_the_window_floating`, issue 122), and settle-before-record. Pure tests in
   `src/window_memory.rs` and `src/journal.rs` cover matching, eviction, diffing, debouncing,
   rotation, and the doctor summary. None involves a real reboot.
 - Unit, `src/updater/`: manifest decisions (the release service's shared vectors), download URLs

@@ -103,6 +103,8 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     /// Windows the user floated with Toggle Float. They stay floating (and
     /// survive agent restarts) until toggled back, unlike a rule's windows.
     pub(super) manual_floating: HashSet<crate::PhysicalWindowId>,
+    /// The Scratchpad Lab's windows; hidden ones are parked and owned by no workspace.
+    pub(super) scratchpad: crate::scratchpad::ScratchpadState,
     pub(super) config: Config,
     /// Previous config from a reload whose rule changes have not yet been
     /// applied to open windows.
@@ -125,6 +127,7 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     pub(super) suppressed_app: Option<crate::AppInstanceId>,
     /// The window a focus command just focused, until Accessibility reports it.
     pub(super) pending_focus: Option<super::commands::PendingFocus>,
+    pub(super) warp_context: super::commands::WarpContext,
     pub(super) pending_fullscreen_focus_restore: HashSet<WorkspaceId>,
     pub(super) persisted_workspace_state: crate::workspace::WorkspaceState,
     /// Title-free placements that survive application relaunches and reboots.
@@ -192,14 +195,17 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 for attempts in &mut self.apply_attempts {
                     attempts.remove(window);
                 }
-                let result = match gesture {
-                    FinalGesture::Drop(window, point) => {
-                        self.drop_window(window, point, preview, outputs.clone(), cancelled)
-                    }
-                    FinalGesture::Resize(window, frame) => {
-                        self.resize_window(window, frame, preview, outputs.clone(), cancelled)
-                    }
-                };
+                let result =
+                    self.with_warp_context(super::commands::WarpContext::Suppressed, |rt| {
+                        match gesture {
+                            FinalGesture::Drop(window, point) => {
+                                rt.drop_window(window, point, preview, outputs.clone(), cancelled)
+                            }
+                            FinalGesture::Resize(window, frame) => {
+                                rt.resize_window(window, frame, preview, outputs.clone(), cancelled)
+                            }
+                        }
+                    });
                 (result, outputs)
             }
             WorkerCommand::RestoreAll(outputs) => {
@@ -207,6 +213,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     self.note_outputs(outputs);
                 }
                 let requested = self.parked.len();
+                // Restored scratchpad windows are ordinary windows when tiling resumes.
+                self.scratchpad.clear();
                 let failed = self.restore_all();
                 self.journal_restore("restore all", requested, failed);
                 // Pause, quit and restart all restore first; the layout they
@@ -220,6 +228,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 return None;
             }
         };
+        self.sync_scratchpad(&outputs);
         self.check_arrangement(&outputs);
         Some(WorkerResult::Status {
             result,
@@ -236,6 +245,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if matches!(
             action,
             WorkerAction::SwitchWorkspace(_)
+                | WorkerAction::SelectWorkspace(_)
                 | WorkerAction::WorkspaceBackAndForth
                 | WorkerAction::MoveWorkspaceToDisplay(_)
                 | WorkerAction::Swipe(..)
@@ -244,37 +254,47 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         ) {
             self.pending_focus = None;
         }
-        match action {
-            WorkerAction::Retile => self.cycle(outputs, cancelled),
-            WorkerAction::SwitchWorkspace(workspace) => self.switch(workspace, outputs, cancelled),
-            WorkerAction::WorkspaceBackAndForth => {
-                self.workspace_back_and_forth(outputs, cancelled)
+        let warp_context = if matches!(
+            action,
+            WorkerAction::SwitchWorkspace(_)
+                | WorkerAction::WorkspaceBackAndForth
+                | WorkerAction::MoveWorkspaceToDisplay(_)
+                | WorkerAction::CycleFocus
+                | WorkerAction::Focus(_)
+                | WorkerAction::MoveFocused(_)
+        ) {
+            super::commands::WarpContext::Explicit
+        } else {
+            super::commands::WarpContext::Suppressed
+        };
+        self.with_warp_context(warp_context, |rt| match action {
+            WorkerAction::Retile => rt.cycle(outputs, cancelled),
+            WorkerAction::SwitchWorkspace(workspace) | WorkerAction::SelectWorkspace(workspace) => {
+                rt.switch(workspace, outputs, cancelled)
             }
+            WorkerAction::WorkspaceBackAndForth => rt.workspace_back_and_forth(outputs, cancelled),
             WorkerAction::MoveWorkspaceToDisplay(target) => {
-                self.move_workspace_to_display(target, outputs, cancelled)
+                rt.move_workspace_to_display(target, outputs, cancelled)
             }
-            WorkerAction::Swipe(swipe, point) => self.swipe(swipe, point, outputs, cancelled),
-            WorkerAction::MoveFocused(workspace) => {
-                self.move_focused(workspace, outputs, cancelled)
-            }
+            WorkerAction::Swipe(swipe, point) => rt.swipe(swipe, point, outputs, cancelled),
+            WorkerAction::MoveFocused(workspace) => rt.move_focused(workspace, outputs, cancelled),
             WorkerAction::MoveApp(bundle_id, workspace) => {
-                self.move_app(&bundle_id, workspace, outputs, cancelled)
+                rt.move_app(&bundle_id, workspace, outputs, cancelled)
             }
-            WorkerAction::CycleFocus => self.cycle_focus(outputs, cancelled),
-            WorkerAction::Focus(direction) => self.focus_relative(direction, outputs, cancelled),
-            WorkerAction::Reorder(direction) => self.reorder_focused(direction, outputs, cancelled),
-            WorkerAction::ToggleLayout => self.toggle_layout(outputs, cancelled),
-            WorkerAction::Resize(direction) => self.resize_focused(direction, outputs, cancelled),
-            WorkerAction::Balance => self.balance_focused(outputs, cancelled),
-            WorkerAction::ToggleFullscreenLayout => {
-                self.toggle_fullscreen_layout(outputs, cancelled)
-            }
-            WorkerAction::ToggleFloat => self.toggle_float(outputs, cancelled),
+            WorkerAction::CycleFocus => rt.cycle_focus(outputs, cancelled),
+            WorkerAction::Focus(direction) => rt.focus_relative(direction, outputs, cancelled),
+            WorkerAction::Reorder(direction) => rt.reorder_focused(direction, outputs, cancelled),
+            WorkerAction::ToggleLayout => rt.toggle_layout(outputs, cancelled),
+            WorkerAction::Resize(direction) => rt.resize_focused(direction, outputs, cancelled),
+            WorkerAction::Balance => rt.balance_focused(outputs, cancelled),
+            WorkerAction::ToggleFullscreenLayout => rt.toggle_fullscreen_layout(outputs, cancelled),
+            WorkerAction::ToggleFloat => rt.toggle_float(outputs, cancelled),
+            WorkerAction::Scratchpad(command) => rt.scratchpad_command(command, outputs, cancelled),
             WorkerAction::MarkWrong => {
-                self.mark_wrong();
-                Ok(self.status(0, &outputs))
+                rt.mark_wrong();
+                Ok(rt.status(0, &outputs))
             }
-        }
+        })
     }
 
     #[cfg(test)]
@@ -346,6 +366,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             inaccessible_since: HashMap::new(),
             minimum_sizes: HashMap::new(),
             manual_floating,
+            scratchpad: crate::scratchpad::ScratchpadState::default(),
             config,
             pending_rule_reload,
             pending_initial_routes: HashMap::new(),
@@ -355,6 +376,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             suppressed_focus: None,
             suppressed_app: None,
             pending_focus: None,
+            warp_context: super::commands::WarpContext::Direct,
             pending_fullscreen_focus_restore,
             persisted_workspace_state,
             memory: MemoryState::default(),
@@ -676,6 +698,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.inaccessible_since.remove(window);
         self.minimum_sizes.remove(window);
         self.manual_floating.remove(window);
+        self.pending_initial_routes.remove(window);
     }
 
     pub(super) fn clear_fullscreen_restore_if_inactive(&mut self, workspace: WorkspaceId) {

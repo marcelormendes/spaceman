@@ -724,8 +724,12 @@ impl Workspaces {
         self.prune_intents(workspace);
     }
 
+    /// Remember `window` as the workspace's focused tile. A window without a
+    /// tile (a float) leaves the remembered tile alone.
     pub(crate) fn remember_focus(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
-        self.last_focused[workspace.index()] = self.engine(workspace).slot_for_window(window);
+        if let Some(slot) = self.engine(workspace).slot_for_window(window) {
+            self.last_focused[workspace.index()] = Some(slot);
+        }
     }
 
     pub(crate) fn preferred_focus(&self, workspace: WorkspaceId) -> Option<PhysicalWindowId> {

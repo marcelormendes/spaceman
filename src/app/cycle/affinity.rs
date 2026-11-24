@@ -74,6 +74,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         });
         let mut affinities = HashMap::new();
         let mut floating_routes = Vec::new();
+        // Read once, and only if a Complete snapshot omits an owned float.
+        let mut onscreen_frames = None;
         for application in &observation.applications {
             let crate::AppObservation::Complete { app, windows, .. } = application else {
                 continue;
@@ -81,11 +83,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             if has_floating {
                 let floating_windows = self.workspaces.floating_windows_for_app(&app.id);
                 for window in floating_windows {
-                    if !windows.iter().any(|observed| observed.id == window)
-                        && !self.parked.contains_key(&window)
+                    if windows.iter().any(|observed| observed.id == window)
+                        || self.parked.contains_key(&window)
                     {
+                        self.omitted_windows.remove(&window);
+                    } else if !self.omitted_float_is_settling(&window, &mut onscreen_frames) {
                         log_event!("forget floating {:?}: not observed and not parked", window);
                         self.workspaces.forget_floating(&window);
+                        self.omitted_windows.remove(&window);
                     }
                 }
             }
@@ -96,6 +101,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             let app_owns_window = self.workspaces.app_owns_windows(&app.id);
             for window in windows {
                 self.heal_reappeared_window(window, visible, server_frames);
+                // Windows in the scratchpad stay under scratchpad control: rules and
+                // initial routing must not move, tile, or reveal them.
+                if let Some(entry) = self.scratchpad.entry(&window.id) {
+                    if entry.shown_on.is_some() {
+                        affinities.insert(window.id.clone(), FrozenWindowAffinity::Floating);
+                        continue;
+                    }
+                    if self.parked.contains_key(&window.id) {
+                        affinities.insert(window.id.clone(), FrozenWindowAffinity::Ignored);
+                        continue;
+                    }
+                }
                 let disposition = self.config.disposition(&app.bundle_id, window);
                 if disposition == WindowDisposition::Ignored {
                     if let Some(owner) = self.workspaces.workspace_of_any(&window.id) {
@@ -104,6 +121,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     }
                     affinities.insert(window.id.clone(), FrozenWindowAffinity::Ignored);
                     continue;
+                }
+                // A float rule, not a manual override, floats this window. An
+                // agent restart seeds every restored float as manual because the
+                // saved state does not say why it floated, so hand it back to the
+                // rule: removing the rule then tiles it again (#160).
+                if disposition == WindowDisposition::Floating
+                    && !self.scratchpad.contains(&window.id)
+                {
+                    self.manual_floating.remove(&window.id);
                 }
                 // A window that already holds a tile keeps it while it temporarily
                 // looks non-resizable (for example while an attached window-modal
@@ -362,7 +388,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         pending.sort_by_key(|(window, _)| (window.app.pid, window.window_id));
         let mut moved = false;
         for (window, route) in pending {
-            if route.attempts >= MAX_INITIAL_ROUTE_ATTEMPTS {
+            if route.attempts >= MAX_INITIAL_ROUTE_ATTEMPTS || self.scratchpad.contains(&window) {
                 self.pending_initial_routes.remove(&window);
                 continue;
             }

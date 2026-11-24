@@ -438,11 +438,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if was_parked {
             if source_output != target_output
                 && let Some(original) = self.parked.get(window).copied()
-                && source_output.contains_center(original)
+                && !target_output.contains_center(original)
             {
+                let from_output = pass
+                    .outputs
+                    .frames()
+                    .find(|display| display.contains_center(original))
+                    .unwrap_or(source_output);
                 let relocated = crate::app::move_workspace::translate_frame_to_output(
                     original,
-                    source_output,
+                    from_output,
                     target_output,
                 );
                 if !self.record_recovery(window, relocated) {
@@ -464,7 +469,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
-        if stay_floating
+        if !was_parked
+            && stay_floating
             && source_output != target_output
             && !self.carry_floating_window(window, source_output, target_output)
         {

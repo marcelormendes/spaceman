@@ -107,6 +107,10 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     /// Previous config from a reload whose rule changes have not yet been
     /// applied to open windows.
     pub(super) pending_rule_reload: Option<cycle::PendingRuleReload>,
+    /// Unowned windows whose initial route failed transiently, with their
+    /// attempt count, so sibling windows succeeding does not strand them on the
+    /// active workspace.
+    pub(super) pending_initial_routes: HashMap<crate::PhysicalWindowId, u8>,
     pub(super) foreground_lanes: HashMap<String, DisplaySelector>,
     /// Global focus history across displays: the workspace focused now and the
     /// one focused before it. `Option+Tab` reads it, so it bounces between the
@@ -345,6 +349,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             manual_floating,
             config,
             pending_rule_reload,
+            pending_initial_routes: HashMap::new(),
             foreground_lanes: HashMap::new(),
             last_focused_workspace: None,
             previous_focused_workspace: None,

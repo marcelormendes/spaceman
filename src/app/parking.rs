@@ -305,6 +305,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     self.restore_window_uncommitted(&window);
                     if !self.parked.contains_key(&window) {
                         restored.push((window, recovery));
+                    } else if recovery != frame {
+                        self.parked.insert(window, recovery);
                     }
                 }
             }

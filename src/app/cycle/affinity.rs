@@ -1,6 +1,10 @@
 use super::*;
 use crate::journal::PlacementSource;
 
+/// Bound retries for transient initial-route failures so a permanently
+/// inaccessible window never loops forever.
+const MAX_INITIAL_ROUTE_ATTEMPTS: u8 = 3;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FrozenWindowAffinity {
     Owned(WorkspaceId),
@@ -55,6 +59,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // process can appear in the same observation that reports the old
         // one terminated.
         self.note_absent_departures(observation);
+        let workspaces = &self.workspaces;
+        let backend = &mut self.backend;
+        self.pending_initial_routes.retain(|window, _| {
+            workspaces.workspace_of_any(window).is_none() && backend.is_process_running(&window.app)
+        });
         let mut affinities = HashMap::new();
         let mut floating_routes = Vec::new();
         for application in &observation.applications {
@@ -123,7 +132,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     FrozenWindowAffinity::Floating
                 } else if floating
                     && let WindowDisposition::Route(target) = disposition
-                    && (!app_owns_window || self.config.route_matches_title(&app.bundle_id, window))
+                    && (!app_owns_window
+                        || self.pending_initial_routes.contains_key(&window.id)
+                        || self.config.route_matches_title(&app.bundle_id, window))
                 {
                     if !self
                         .scope
@@ -173,6 +184,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                                 ));
                             }
                             if !app_owns_window
+                                || self.pending_initial_routes.contains_key(&window.id)
                                 || self.config.route_matches_title(&app.bundle_id, window)
                             {
                                 FrozenWindowAffinity::ExplicitRoute(target)
@@ -228,9 +240,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     && !self.carry_floating_window(window, source_output, target_output)
                 {
                     *failed += 1;
+                    self.record_initial_route_retry(window);
                     continue;
                 }
                 log_event!("route floating {:?} -> workspace {}", window, target);
+                self.pending_initial_routes.remove(window);
                 self.workspaces.own_floating(window.clone(), *target);
                 self.note_placement(window, PlacementSource::Rule, *target);
             } else {
@@ -247,13 +261,17 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             window,
                             target
                         );
+                        self.pending_initial_routes.remove(window);
                         self.suppress_parked_focus(window, focused, frontmost);
                         self.workspaces.own_floating(window.clone(), *target);
                         self.note_placement(window, PlacementSource::Rule, *target);
                     }
-                    macos::ApplyOutcome::Gone => {}
+                    macos::ApplyOutcome::Gone => {
+                        self.pending_initial_routes.remove(window);
+                    }
                     _ => {
                         *failed += 1;
+                        self.record_initial_route_retry(window);
                     }
                 }
             }
@@ -289,12 +307,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         self.suppress_parked_focus(window, focused, frontmost);
                     }
                     macos::ApplyOutcome::Gone => {
+                        self.pending_initial_routes.remove(window);
                         self.forget_window(workspace, window);
                         continue;
                     }
                     _ => {
                         *failed += 1;
                         self.forget_window(workspace, window);
+                        self.record_initial_route_retry(window);
                         continue;
                     }
                 }
@@ -302,9 +322,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             if self.workspaces.move_window(window, *target).is_none() {
                 continue;
             }
+            self.pending_initial_routes.remove(window);
             routed_targets.insert(*target);
         }
         routed_targets
+    }
+
+    fn record_initial_route_retry(&mut self, window: &crate::PhysicalWindowId) {
+        let attempts = self
+            .pending_initial_routes
+            .entry(window.clone())
+            .or_insert(0);
+        *attempts = attempts.saturating_add(1);
+        if *attempts >= MAX_INITIAL_ROUTE_ATTEMPTS {
+            self.pending_initial_routes.remove(window);
+        }
     }
 
     /// Hidden workspaces are not reconciled, so an app that quit while its

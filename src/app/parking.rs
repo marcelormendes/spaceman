@@ -303,10 +303,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     }
                     // Only an applied or gone restore retires the entry.
                     self.restore_window_uncommitted(&window);
-                    if !self.parked.contains_key(&window) {
-                        restored.push((window, recovery));
-                    } else if recovery != frame {
-                        self.parked.insert(window, recovery);
+                    match self.parked.entry(window) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            restored.push((entry.into_key(), recovery));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if recovery != frame {
+                                entry.insert(recovery);
+                            }
+                        }
                     }
                 }
             }

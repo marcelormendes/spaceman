@@ -608,7 +608,7 @@ mod tests {
 
         ui.edit_and_retile(|doc| doc.remove(0));
         assert_eq!(ui.error, None);
-        assert_eq!(ui.doc.rules().len(), 0);
+        assert!(ui.doc.rules().is_empty());
         assert_eq!(ui.sent_actions.borrow().len(), 3);
 
         ui.edit_and_retile(|doc| doc.set_monitor(spaceman::WorkspaceId::SIX, Some("main")));

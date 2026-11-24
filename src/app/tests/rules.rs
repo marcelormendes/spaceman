@@ -705,7 +705,7 @@ fn failed_cross_display_floating_carry_retries_on_adoption_and_rule_reload() {
         ..FakeBackend::default()
     };
     backend.frames.insert(settings.clone(), frame(50));
-    let mut runtime = runtime(backend);
+    let mut runtime = super::runtime(backend);
     runtime.cycle(outputs(), &cancelled).unwrap();
     assert_eq!(
         runtime.workspaces.floating_workspace_of(&settings),
@@ -802,7 +802,7 @@ fn reassigned_workspace_retries_failed_recovery_and_floating_carry_idempotently(
     };
     backend.frames.insert(first.clone(), frame(1050));
     backend.frames.insert(second.clone(), frame(1100));
-    let mut runtime = runtime(backend);
+    let mut runtime = super::runtime(backend);
     runtime.workspaces.switch(nine);
     runtime.workspaces.own_floating(first.clone(), nine);
     runtime.workspaces.own_floating(second.clone(), nine);

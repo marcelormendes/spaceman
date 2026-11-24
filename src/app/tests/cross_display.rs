@@ -258,7 +258,7 @@ fn reassigning_workspace_display_via_config_relocates_recovery_frames_and_parks_
         ..FakeBackend::default()
     };
     backend.frames.insert(visible_win.clone(), frame(1050));
-    let mut runtime = runtime(backend);
+    let mut runtime = super::runtime(backend);
     bind(&mut runtime, WorkspaceId::SIX, &visible_win);
 
     runtime.replace_config(to_main);

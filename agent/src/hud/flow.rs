@@ -103,7 +103,6 @@ impl HudFlow {
                 row.visible
             },
             still,
-            active: self.is_held(),
             visited_empty: &self.visited_empty,
         })
     }
@@ -179,17 +178,6 @@ impl HudFlow {
             *hide_at_ms = (*hide_at_ms).max(now_ms.saturating_add(RESUME_HOLD_MS));
         }
         resurrected || was_active != self.is_held()
-    }
-
-    /// Begins a smooth exit immediately (e.g. after opening Spaceman Settings from the pill).
-    pub fn leave_now(&mut self, now_ms: u64) -> bool {
-        self.hovered = false;
-        self.menu_open = false;
-        if matches!(self.stage, Stage::Shown { .. }) {
-            self.leave(now_ms);
-            return true;
-        }
-        false
     }
 
     pub fn trigger(&mut self, row: UiHudDisplay, now_ms: u64) -> HudTransition {

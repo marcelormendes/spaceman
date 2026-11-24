@@ -1,7 +1,9 @@
 mod benchmarks;
 mod cross_display;
 mod dispatch;
+mod display_disconnect;
 mod float;
+mod float_regressions;
 mod focus;
 mod fullscreen;
 mod gestures;
@@ -15,6 +17,7 @@ mod reconciliation;
 mod reliability;
 mod rule_reload;
 mod rules;
+mod scratchpad;
 mod spacing;
 mod startup;
 mod switching;
@@ -36,6 +39,7 @@ enum BackendCall {
     Apply(crate::PhysicalWindowId, crate::Rect),
     Raise(crate::PhysicalWindowId),
     Focus(crate::PhysicalWindowId),
+    WarpPointer((i32, i32)),
 }
 
 #[derive(Default)]
@@ -64,6 +68,9 @@ struct FakeBackend {
     /// Widths windows refuse to shrink below, clamped synchronously like AppKit.
     minimum_widths: HashMap<crate::PhysicalWindowId, i32>,
     focus_outcome: Option<bool>,
+    /// Raised by the next position write: an activation cancelling the worker
+    /// in the middle of a switch.
+    cancel_on_position: Option<Arc<AtomicBool>>,
     server_snapshot_unavailable: bool,
     running_apps: Option<HashSet<AppInstanceId>>,
     snapshot_count: usize,
@@ -76,6 +83,8 @@ struct FakeBackend {
     config_path: Option<PathBuf>,
     fail_persist_config: bool,
     persisted_monitors: Vec<(WorkspaceId, DisplaySelector)>,
+    pointer: Option<(i32, i32)>,
+    mouse_down: bool,
 }
 
 impl WorkspaceBackend for FakeBackend {
@@ -183,6 +192,9 @@ impl WorkspaceBackend for FakeBackend {
     ) -> macos::ApplyOutcome {
         self.calls
             .push(BackendCall::SetPosition(window.clone(), target));
+        if let Some(cancelled) = self.cancel_on_position.take() {
+            cancelled.store(true, Ordering::Release);
+        }
         if let Some(outcome) = self.position_outcome {
             return outcome;
         }
@@ -223,6 +235,23 @@ impl WorkspaceBackend for FakeBackend {
         }
         self.focused = Some(window.clone());
         self.frontmost = Some(window.app.clone());
+        true
+    }
+
+    fn pointer_location(&mut self) -> Option<(i32, i32)> {
+        self.pointer
+    }
+
+    fn mouse_down(&mut self) -> bool {
+        self.mouse_down
+    }
+
+    fn warp_pointer(&mut self, point: (i32, i32)) -> bool {
+        if self.mouse_down {
+            return false;
+        }
+        self.calls.push(BackendCall::WarpPointer(point));
+        self.pointer = Some(point);
         true
     }
 

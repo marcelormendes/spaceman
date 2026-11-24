@@ -145,20 +145,21 @@ fn run_assign(args: &[&str], path_override: Option<&Path>) -> Result<String, Str
     let monitor = (*raw_monitor).to_owned();
 
     let path = resolve_config_path(path_override)?;
-    let (mut doc, _) = ConfigDoc::load_or_default(&path)?;
-    if let Some(existing) = doc
-        .workspaces
-        .iter_mut()
-        .find(|entry| entry.workspace == workspace)
-    {
-        existing.monitor = monitor.clone();
-    } else {
-        doc.workspaces.push(WorkspaceDoc {
-            workspace,
-            monitor: monitor.clone(),
-        });
-    }
-    doc.save_atomic(&path)?;
+    ConfigDoc::edit_locked(&path, |doc| {
+        if let Some(existing) = doc
+            .workspaces
+            .iter_mut()
+            .find(|entry| entry.workspace == workspace)
+        {
+            existing.monitor = monitor.clone();
+        } else {
+            doc.workspaces.push(WorkspaceDoc {
+                workspace,
+                monitor: monitor.clone(),
+            });
+        }
+        Ok(((), true))
+    })?;
 
     if json {
         to_json_pretty(&WorkspaceAssignOutput {
@@ -180,13 +181,31 @@ fn run_clear(args: &[&str], path_override: Option<&Path>) -> Result<String, Stri
     let default_monitor = default_monitor_for(workspace);
 
     let path = resolve_config_path(path_override)?;
-    let (mut doc, _) = ConfigDoc::load_or_default(&path)?;
-    let before = doc.workspaces.len();
-    doc.workspaces.retain(|entry| entry.workspace != workspace);
-    let cleared = doc.workspaces.len() != before;
-    if cleared {
-        doc.save_atomic(&path)?;
-    }
+    let cleared = ConfigDoc::edit_locked(&path, |doc| {
+        let referenced_by_rule = doc
+            .rules
+            .iter()
+            .any(|rule| rule.workspace == Some(workspace));
+        let cleared = if workspace.number().is_some() || referenced_by_rule {
+            let before = doc.workspaces.len();
+            doc.workspaces.retain(|entry| entry.workspace != workspace);
+            doc.workspaces.len() != before
+        } else if let Some(existing) = doc
+            .workspaces
+            .iter_mut()
+            .find(|entry| entry.workspace == workspace)
+        {
+            if existing.monitor == default_monitor {
+                false
+            } else {
+                existing.monitor = default_monitor.to_owned();
+                true
+            }
+        } else {
+            false
+        };
+        Ok((cleared, cleared))
+    })?;
 
     if json {
         to_json_pretty(&WorkspaceClearOutput {

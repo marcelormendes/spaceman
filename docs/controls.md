@@ -29,8 +29,16 @@ next one, as with macOS Spaces. Spaceman only listens to the trackpad, so macOS 
 same swipe: set "Swipe between full-screen applications" to four fingers or off in Trackpad
 settings. Four-finger swipes and vertical swipes are left to macOS.
 
+Every shortcut above can be rebound, unbound, or replaced in the config file's `[shortcuts]` table;
+see [Configuration › Shortcuts](configuration.md#shortcuts). The table lists the built-in defaults.
+Settings › Shortcuts shows each shortcut's current chord: click its keys and press a new chord to
+rebind it (`esc` cancels, `⌫` clears it), or pick a Base modifier (`⌥`, `⌃⌥`, or `⌃⌥⌘`) to move
+every built-in shortcut at once. Changes register live, with no restart.
+
 Named workspace shortcuts are registered only when referenced by config. If a configured letter
-overlaps a built-in shortcut, the workspace shortcut takes precedence.
+overlaps a built-in shortcut, the workspace shortcut takes precedence. A `[shortcuts]` binding claims
+its chord before both, so binding `alt+h` replaces the built-in Focus Left and a named workspace H's
+switch shortcut too, and whichever was skipped is logged in `agent.log`.
 
 Spaceman remembers the last-focused logical tile in each workspace and restores that focus when the
 workspace becomes active again. Pressing an already-active workspace shortcut preserves the current
@@ -80,6 +88,33 @@ cannot be confirmed by the window server within the bounded reveal wait, the swi
 the outgoing workspace stays active and pending incoming reveals are re-parked. Retry once the slow
 application is responsive. Successful Accessibility writes alone do not confirm arrival.
 
+## Scratchpad (Lab)
+
+With `[labs] scratchpad = true` (see [Configuration › Labs](configuration.md#labs)), Spaceman keeps an
+i3/sway-style scratchpad: windows hidden off-screen until summoned. Its shortcuts register only while
+the Lab is on, so a default install has none of them.
+
+| Keys | Action |
+| --- | --- |
+| `Option+Shift+\` | Hide the focused window in the scratchpad, or take a shown scratchpad window out of it |
+| `Option+\` | Summon the next scratchpad window onto the focused display, or hide the one shown there |
+
+Sending a window to the scratchpad removes it from its workspace (the remaining tiles re-fill its
+space), parks it off-screen and focuses the workspace's remembered tile. Summoning floats it above
+the focused display's tiles, centred, at the size it last floated at (three quarters of the display
+the first time, never larger than the display), and focuses it; the tiles stay as they were.
+Pressing `Option+\` again hides it and returns focus to the tiles. With several windows in the
+scratchpad, each press summons the next one in turn. A shown scratchpad window hides when its
+workspace is switched away and stays hidden until summoned again, on whichever workspace is then
+focused. `Option+Shift+\` on a shown scratchpad window tiles it on the current workspace. Moving it to
+a workspace, tiling it with `Option+Shift+Space`, or closing it also takes it out of the
+scratchpad. `Scratchpad is empty` in the menu status means there was nothing to summon.
+
+A hidden scratchpad window is parked like a window on an inactive workspace, with its recovery frame
+in `parked-windows.json`, so pausing, quitting, restarting, installing an update, a crash, or turning
+the Lab off brings it back on screen, where it tiles again. Which windows are in the scratchpad is not
+saved across agent restarts.
+
 ## Menu
 
 The menu-bar control shows active workspace/layout glyphs and runtime errors. Its actions are:
@@ -113,8 +148,11 @@ and a copy Spaceman can't replace offers `Download`.
 
 ## CLI
 
-The installed CLI is `~/.local/bin/spaceman`. Add `~/.local/bin` to `PATH`, or invoke that absolute
-path. Commands that alter layouts require automatic tiling to be enabled.
+Homebrew cask installs link the bundled CLI into `$(brew --prefix)/bin/spaceman` (typically
+`/opt/homebrew/bin/spaceman`, already on `PATH`). Source installs (`scripts/install-app.sh`) link
+`~/.local/bin/spaceman` (add `~/.local/bin` to `PATH` or invoke that absolute path), and direct ZIP
+installs bundle the CLI at `/Applications/Spaceman.app/Contents/MacOS/spaceman`. Commands that
+alter layouts require automatic tiling to be enabled.
 
 ```sh
 spaceman ctl status
@@ -135,6 +173,8 @@ spaceman ctl float
 spaceman ctl resize shrink
 spaceman ctl resize grow
 spaceman ctl balance
+spaceman ctl scratchpad toggle
+spaceman ctl scratchpad mark
 spaceman ctl pause
 spaceman ctl resume
 spaceman ctl retile
@@ -151,7 +191,9 @@ spaceman doctor 24
 
 Directions are `left`, `down`, `up`, and `right`. `focus next` is Option-backtick,
 `fullscreen` toggles the focused workspace's Fullscreen Layout, like `Option+Shift+F`, and `float`
-toggles the focused window's floating, like `Option+Shift+Space`. `balance` equalizes the focused tile's immediate
+toggles the focused window's floating, like `Option+Shift+Space`. `scratchpad toggle` and
+`scratchpad mark` are `Option+\` and `Option+Shift+\`; while `[labs] scratchpad` is off they report
+`Scratchpad is off`. `balance` equalizes the focused tile's immediate
 split while respecting nested minimum sizes. `hud` repeatedly renders sanitized runtime geometry in
 the terminal until interrupted. `ctl wrong` marks the journal the moment something looks wrong and
 writes a full arrangement snapshot, so `doctor` shows what the screen held then.

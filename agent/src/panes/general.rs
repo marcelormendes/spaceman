@@ -3,7 +3,10 @@
 
 use rune::{El, Tx, col};
 use rune_kit::SegmentedControl;
-use spaceman::{app::UiLaunchAtLogin, config::HudStyle};
+use spaceman::{
+    app::UiLaunchAtLogin,
+    config::{HudStyle, MouseFollowsFocus},
+};
 
 use crate::{
     Ui,
@@ -23,6 +26,19 @@ fn hud_mode_index(enabled: bool, style: HudStyle) -> usize {
         .iter()
         .position(|(_, mode)| *mode == current)
         .unwrap_or(1)
+}
+
+const MOUSE_FOLLOW_MODES: [(&str, MouseFollowsFocus); 3] = [
+    ("Off", MouseFollowsFocus::Off),
+    ("Display", MouseFollowsFocus::Display),
+    ("Window", MouseFollowsFocus::Window),
+];
+
+fn mouse_follow_index(mode: MouseFollowsFocus) -> usize {
+    MOUSE_FOLLOW_MODES
+        .iter()
+        .position(|(_, candidate)| *candidate == mode)
+        .unwrap_or(0)
 }
 
 pub fn pane(ui: &Ui, p: Paint) -> El {
@@ -114,7 +130,35 @@ pub fn pane(ui: &Ui, p: Paint) -> El {
             }),
             "login",
         );
-        sections.push(controls::card(p, "agent", vec![tiling, hud, login]));
+        let mouse_follows_focus = highlight(
+            controls::setting_row(
+                p,
+                "mouse-follows-focus",
+                "Mouse follows focus",
+                Some((
+                    "Move the pointer on keyboard focus changes.".into(),
+                    p.muted(),
+                )),
+                SegmentedControl::new(
+                    &MOUSE_FOLLOW_MODES.map(|(label, _)| label.to_owned()),
+                    Some(mouse_follow_index(ui.doc.mouse_follows_focus())),
+                )
+                .fit()
+                .on_pick(|ui: &mut Ui, index, _: &mut Tx| {
+                    if let Some((_, mode)) = MOUSE_FOLLOW_MODES.get(index) {
+                        ui.edit(|doc| doc.set_mouse_follows_focus(*mode));
+                    }
+                })
+                .build(p.k)
+                .key("mouse-follows-focus-picker"),
+            ),
+            "mouse-follows-focus",
+        );
+        sections.push(controls::card(
+            p,
+            "agent",
+            vec![tiling, hud, mouse_follows_focus, login],
+        ));
     }
     sections.push(crate::updates::section(ui, p));
     let focus = ui.highlight_feature.as_deref();
@@ -183,5 +227,12 @@ mod tests {
         assert_eq!(hud_mode_index(false, HudStyle::Layouts), 0);
         assert_eq!(hud_mode_index(true, HudStyle::Icons), 1);
         assert_eq!(hud_mode_index(true, HudStyle::Layouts), 2);
+    }
+
+    #[test]
+    fn mouse_follow_picker_maps_off_display_and_window() {
+        assert_eq!(mouse_follow_index(MouseFollowsFocus::Off), 0);
+        assert_eq!(mouse_follow_index(MouseFollowsFocus::Display), 1);
+        assert_eq!(mouse_follow_index(MouseFollowsFocus::Window), 2);
     }
 }

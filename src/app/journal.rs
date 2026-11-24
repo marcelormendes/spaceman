@@ -55,7 +55,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             self.memory.memory.len()
         );
         self.journal_event(JournalEvent::Start {
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: crate::updater::build_version().into(),
             pid: std::process::id(),
             restored_state,
             slots,
@@ -186,11 +186,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         server_frames: &HashMap<u32, crate::Rect>,
     ) -> Vec<Anomaly> {
         let displays: Vec<_> = outputs.frames().collect();
-        let on_display = |frame: crate::Rect| {
-            displays
-                .iter()
-                .any(|display| display.contains_center(frame))
-        };
+        let on_display = |frame: crate::Rect| crate::geometry::shows_on(frame, &displays);
         let visible: HashSet<_> = visible_workspaces
             .iter()
             .map(|resolved| resolved.workspace)

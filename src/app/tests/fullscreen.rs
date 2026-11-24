@@ -540,3 +540,126 @@ fn opening_a_floating_window_preserves_fullscreen_layout() {
         Some(WorkspaceId::ONE)
     );
 }
+
+/// #153: a parked tiled window that its frontmost app brings back onto a
+/// visible Fullscreen Layout workspace exits Fullscreen Layout and splits.
+#[test]
+fn reappearing_parked_tile_exits_fullscreen_layout_and_splits_side_by_side() {
+    let first = window(10);
+    let second = window(20);
+    let returning = window(30);
+    let visible = [(first.clone(), frame(40)), (second.clone(), frame(500))];
+    let mut backend = FakeBackend {
+        focused: Some(first.clone()),
+        frontmost: Some(first.app.clone()),
+        observation: Some(observation_for_windows(
+            "com.example.Test",
+            &first,
+            &visible,
+        )),
+        frames: visible.into_iter().collect(),
+        ..FakeBackend::default()
+    };
+    backend
+        .frames
+        .insert(returning.clone(), main_parked_frame(frame(100)));
+    let mut rt = runtime_with_parked(backend, [(returning.clone(), frame(100))]);
+    bind(&mut rt, WorkspaceId::ONE, &first);
+    bind(&mut rt, WorkspaceId::ONE, &second);
+    bind(&mut rt, WorkspaceId::new(2).unwrap(), &returning);
+    let cancelled = AtomicBool::new(false);
+    rt.cycle(outputs(), &cancelled).unwrap();
+    rt.toggle_fullscreen_layout(outputs(), &cancelled).unwrap();
+    assert!(rt.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    assert_eq!(rt.backend.frames[&first], rt.backend.frames[&second]);
+
+    rt.backend.frames.insert(returning.clone(), frame(100));
+    let returned = [
+        (first.clone(), frame(40)),
+        (second.clone(), frame(500)),
+        (returning.clone(), frame(100)),
+    ];
+    rt.backend.observation = Some(observation_for_windows(
+        "com.example.Test",
+        &first,
+        &returned,
+    ));
+    rt.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(
+        rt.workspaces.workspace_of(&returning),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(!rt.parked.contains_key(&returning));
+    assert_eq!(
+        rt.workspaces.engine(WorkspaceId::ONE).bound_windows().len(),
+        3
+    );
+    assert!(!rt.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    let frames = [&first, &second, &returning].map(|id| rt.backend.frames[id]);
+    assert_ne!(frames[0], frames[1]);
+    assert_ne!(frames[0], frames[2]);
+    assert_ne!(frames[1], frames[2]);
+}
+
+/// #153 control: a parked floating window that reappears on a Fullscreen
+/// Layout workspace re-homes without exiting Fullscreen Layout.
+#[test]
+fn reappearing_parked_floating_window_preserves_fullscreen_layout() {
+    let first = window(10);
+    let second = window(20);
+    let floating = window(30);
+    let visible = [(first.clone(), frame(40)), (second.clone(), frame(500))];
+    let mut backend = FakeBackend {
+        focused: Some(first.clone()),
+        frontmost: Some(first.app.clone()),
+        observation: Some(observation_for_windows(
+            "com.example.Test",
+            &first,
+            &visible,
+        )),
+        frames: visible.into_iter().collect(),
+        ..FakeBackend::default()
+    };
+    backend
+        .frames
+        .insert(floating.clone(), main_parked_frame(frame(100)));
+    let mut rt = runtime_with_parked(backend, [(floating.clone(), frame(100))]);
+    bind(&mut rt, WorkspaceId::ONE, &first);
+    bind(&mut rt, WorkspaceId::ONE, &second);
+    rt.workspaces
+        .own_floating(floating.clone(), WorkspaceId::new(2).unwrap());
+    let cancelled = AtomicBool::new(false);
+    rt.cycle(outputs(), &cancelled).unwrap();
+    rt.toggle_fullscreen_layout(outputs(), &cancelled).unwrap();
+    assert!(rt.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+
+    rt.backend.frames.insert(floating.clone(), frame(100));
+    let mut returned = observation_for_windows(
+        "com.example.Test",
+        &first,
+        &[
+            (first.clone(), frame(40)),
+            (second.clone(), frame(500)),
+            (floating.clone(), frame(100)),
+        ],
+    );
+    if let crate::AppObservation::Complete { windows, .. } = &mut returned.applications[0] {
+        windows
+            .iter_mut()
+            .find(|observed| observed.id == floating)
+            .unwrap()
+            .resizable = false;
+    }
+    rt.backend.observation = Some(returned);
+    rt.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(
+        rt.workspaces.floating_workspace_of(&floating),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(!rt.parked.contains_key(&floating));
+    assert!(rt.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    assert_eq!(rt.backend.frames[&first], outputs().main().frame);
+    assert_eq!(rt.backend.frames[&second], outputs().main().frame);
+}

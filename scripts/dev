@@ -8,19 +8,36 @@
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+once=false
+if [ $# -eq 1 ] && [ "$1" = "--once" ]; then
+  once=true
+elif [ $# -gt 0 ]; then
+  echo "usage: $0 [--once]" >&2
+  exit 2
+fi
 stamp() { find src agent native app Cargo.toml Cargo.lock build.rs -type f -exec stat -f '%m %N' {} + 2>/dev/null | md5; }
 install() {
   echo "$(date '+%H:%M:%S') building"
   if bundle=$(scripts/build-app.sh | tail -n 1) && [ -d "$bundle/Contents" ] \
     && scripts/install-app.sh --bundle "$bundle" >/dev/null; then
     echo "$(date '+%H:%M:%S') installed $(git rev-parse --short HEAD)$(git diff --quiet || echo '+dirty')"
+    return 0
   else
-    echo "$(date '+%H:%M:%S') build or install failed; waiting for the next save"
+    status=$?
+    if $once; then
+      echo "$(date '+%H:%M:%S') build or install failed" >&2
+    else
+      echo "$(date '+%H:%M:%S') build or install failed; waiting for the next save"
+    fi
+    return "$status"
   fi
 }
+if $once; then
+  install
+  exit $?
+fi
 last=$(stamp)
 install
-[ "${1:-}" = "--once" ] && exit 0
 while true; do
   sleep 1
   now=$(stamp)

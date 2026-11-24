@@ -385,3 +385,37 @@ fn perpendicular_reorder_creates_a_mixed_split_for_three_windows() {
     );
     assert!(runtime.backend.workspace_state.is_some());
 }
+
+/// #119: an empty workspace on the adjacent display still takes the tile.
+#[test]
+fn reorder_moves_to_an_empty_workspace_on_the_adjacent_display() {
+    let moving = window(10);
+    let mut backend = FakeBackend {
+        focused: Some(moving.clone()),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(moving.clone(), frame(50));
+    let mut runtime = runtime(backend);
+    bind(&mut runtime, WorkspaceId::ONE, &moving);
+    assert!(runtime.workspaces.windows(WorkspaceId::SIX).is_empty());
+
+    runtime
+        .reorder_focused(Direction::Right, outputs(), &AtomicBool::new(false))
+        .unwrap();
+
+    assert_eq!(
+        runtime.workspaces.workspace_of(&moving),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(runtime.is_visible(WorkspaceId::SIX, &outputs()));
+    assert_eq!(runtime.backend.focused, Some(moving.clone()));
+
+    // Nothing lies further right: the key does nothing.
+    runtime
+        .reorder_focused(Direction::Right, outputs(), &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&moving),
+        Some(WorkspaceId::SIX)
+    );
+}

@@ -180,6 +180,36 @@ fn update_channel_round_trips_and_leaves_stable_out() {
 }
 
 #[test]
+fn mouse_follows_focus_round_trips_preserving_comments_and_leaves_off_out() {
+    use spaceman::config::{Config, MouseFollowsFocus};
+    let mut doc = Doc::parse(SOURCE);
+    assert_eq!(doc.mouse_follows_focus(), MouseFollowsFocus::Off);
+    doc.set_mouse_follows_focus(MouseFollowsFocus::Display);
+    assert_eq!(doc.mouse_follows_focus(), MouseFollowsFocus::Display);
+    let display = doc.source();
+    assert!(display.contains("# OpenCode Browser's agent window."));
+    assert!(display.contains("mouse_follows_focus = \"display\""));
+    assert_eq!(
+        Config::parse(&display).unwrap().mouse_follows_focus(),
+        MouseFollowsFocus::Display
+    );
+
+    doc.set_mouse_follows_focus(MouseFollowsFocus::Window);
+    assert_eq!(doc.mouse_follows_focus(), MouseFollowsFocus::Window);
+    let window = doc.source();
+    assert!(window.contains("mouse_follows_focus = \"window\""));
+    assert_eq!(
+        Config::parse(&window).unwrap().mouse_follows_focus(),
+        MouseFollowsFocus::Window
+    );
+
+    doc.set_mouse_follows_focus(MouseFollowsFocus::Off);
+    assert_eq!(doc.mouse_follows_focus(), MouseFollowsFocus::Off);
+    assert!(!doc.source().contains("[settings]"));
+    assert!(doc.source().contains("# OpenCode Browser's agent window."));
+}
+
+#[test]
 fn spacing_round_trips_and_leaves_the_file_as_it_was() {
     use spaceman::{config::Config, spacing::Spacing};
     let mut doc = Doc::parse(SOURCE);
@@ -239,4 +269,380 @@ fn spacing_ignores_values_the_engine_would_refuse() {
     assert!(doc.error.is_some());
     assert_eq!(doc.spacing().inner, 0);
     assert_eq!(doc.spacing().top, 9);
+}
+
+#[test]
+fn inline_rules_array_reads_adds_moves_and_removes_without_losing_entries() {
+    let variants = [
+        concat!(
+            "version = 1\n",
+            "rules = [\n",
+            "  { bundle_id = \"com.example.First\", action = \"float\" },\n",
+            "  { bundle_id = \"com.example.Second\", action = \"route\", workspace = \"M\" },\n",
+            "]\n",
+        ),
+        concat!(
+            "# Spaceman configuration.\n",
+            "version = 1\n",
+            "\n",
+            "rules = [\n",
+            "  # Keep this comment.\n",
+            "  { bundle_id = \"com.example.First\", action = \"float\" },\n",
+            "  { bundle_id = \"com.example.Second\", action = \"route\", workspace = \"M\" },\n",
+            "]\n",
+        ),
+        "version = 1\nrules = [{ bundle_id = \"com.example.First\", action = \"float\" }, { bundle_id = \"com.example.Second\", action = \"route\", workspace = \"M\" }]\n",
+    ];
+
+    for source in variants {
+        let mut doc = Doc::parse(source);
+        assert_eq!(doc.error, None, "source:\n{source}");
+        let initial = doc.rules();
+        assert_eq!(initial.len(), 2, "source:\n{source}");
+        assert_eq!(initial[0].bundle_id.as_deref(), Some("com.example.First"));
+        assert_eq!(initial[0].place, Place::Float);
+        assert_eq!(initial[1].bundle_id.as_deref(), Some("com.example.Second"));
+        assert_eq!(initial[1].place, Place::Workspace(ws("M")));
+        assert_eq!(doc.named_workspaces(), vec![ws("M")]);
+
+        // Adding a third app keeps both existing inline rules and produces valid TOML.
+        doc.add("com.example.Third", Place::Float);
+        let after_add = doc.source();
+        assert!(
+            spaceman::config::Config::parse(&after_add).is_ok(),
+            "invalid TOML after add:\n{after_add}"
+        );
+        let rules = Doc::parse(&after_add).rules();
+        assert_eq!(rules.len(), 3, "after add:\n{after_add}");
+        assert_eq!(rules[0].bundle_id.as_deref(), Some("com.example.First"));
+        assert_eq!(rules[1].bundle_id.as_deref(), Some("com.example.Second"));
+        assert_eq!(rules[2].bundle_id.as_deref(), Some("com.example.Third"));
+        assert_eq!(rules[2].place, Place::Float);
+
+        // Moving rules updates action/workspace in place without losing the other rules.
+        doc.place(0, Place::Workspace(ws("3")));
+        doc.place(1, Place::Float);
+        let after_move = doc.source();
+        assert!(
+            spaceman::config::Config::parse(&after_move).is_ok(),
+            "invalid TOML after move:\n{after_move}"
+        );
+        let moved = Doc::parse(&after_move).rules();
+        assert_eq!(moved.len(), 3);
+        assert_eq!(moved[0].place, Place::Workspace(ws("3")));
+        assert_eq!(moved[1].place, Place::Float);
+        assert_eq!(moved[2].place, Place::Float);
+
+        // Removing every rule empties the key cleanly.
+        doc.remove(1);
+        assert_eq!(doc.rules().len(), 2);
+        assert!(spaceman::config::Config::parse(&doc.source()).is_ok());
+        doc.remove(1);
+        doc.remove(0);
+        let empty = doc.source();
+        assert!(doc.rules().is_empty());
+        assert!(!empty.contains("rules"), "rules key should drop:\n{empty}");
+        assert!(spaceman::config::Config::parse(&empty).is_ok());
+    }
+}
+
+#[test]
+fn empty_inline_rules_array_supports_adding_an_app() {
+    let mut doc = Doc::parse("version = 1\nrules = []\n");
+    assert_eq!(doc.error, None);
+    assert!(doc.rules().is_empty());
+    doc.add("com.example.Only", Place::Workspace(ws("2")));
+    let saved = doc.source();
+    assert!(
+        spaceman::config::Config::parse(&saved).is_ok(),
+        "invalid TOML:\n{saved}"
+    );
+    let rules = Doc::parse(&saved).rules();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].bundle_id.as_deref(), Some("com.example.Only"));
+    assert_eq!(rules[0].place, Place::Workspace(ws("2")));
+}
+
+#[test]
+fn inline_workspaces_array_reads_updates_adds_and_clears_assignments() {
+    let variants = [
+        "version = 1\nworkspaces = [{ workspace = 9, monitor = \"main\" }]\n",
+        concat!(
+            "# Spaceman configuration.\n",
+            "version = 1\n",
+            "\n",
+            "workspaces = [\n",
+            "  # Keep workspace 9 on main.\n",
+            "  { workspace = 9, monitor = \"main\" },\n",
+            "]\n",
+        ),
+    ];
+
+    for source in variants {
+        let mut doc = Doc::parse(source);
+        assert_eq!(doc.error, None, "source:\n{source}");
+        assert_eq!(doc.monitor(ws("9")).as_deref(), Some("main"));
+        assert_eq!(doc.monitor(ws("2")), None);
+
+        // Assigning workspace 2 keeps workspace 9 and writes valid TOML.
+        doc.set_monitor(ws("2"), Some("secondary"));
+        let after_add = doc.source();
+        assert!(
+            spaceman::config::Config::parse(&after_add).is_ok(),
+            "invalid TOML after adding workspace:\n{after_add}"
+        );
+        let reloaded = Doc::parse(&after_add);
+        assert_eq!(reloaded.monitor(ws("9")).as_deref(), Some("main"));
+        assert_eq!(reloaded.monitor(ws("2")).as_deref(), Some("secondary"));
+
+        // Updating an existing entry and declaring a named workspace both round-trip.
+        doc.set_monitor(ws("9"), Some("Studio Display"));
+        doc.set_monitor(ws("D"), Some("secondary"));
+        let after_update = doc.source();
+        assert!(
+            spaceman::config::Config::parse(&after_update).is_ok(),
+            "invalid TOML after update:\n{after_update}"
+        );
+        let reloaded = Doc::parse(&after_update);
+        assert_eq!(reloaded.monitor(ws("9")).as_deref(), Some("Studio Display"));
+        assert_eq!(reloaded.monitor(ws("D")).as_deref(), Some("secondary"));
+        assert_eq!(reloaded.named_workspaces(), vec![ws("D")]);
+
+        // Clearing numbered overrides removes them, while solely declared named
+        // workspace D stays enabled on its default display ("main").
+        doc.set_monitor(ws("2"), None);
+        doc.set_monitor(ws("9"), None);
+        doc.set_monitor(ws("D"), None);
+        assert_eq!(doc.monitor(ws("9")), None);
+        assert_eq!(doc.monitor(ws("D")).as_deref(), Some("main"));
+        assert_eq!(doc.named_workspaces(), vec![ws("D")]);
+        assert!(spaceman::config::Config::parse(&doc.source()).is_ok());
+
+        // Once a route rule references D, clearing drops the now-redundant entry cleanly.
+        doc.add("com.example.App", Place::Workspace(ws("D")));
+        doc.set_monitor(ws("D"), None);
+        let empty = doc.source();
+        assert_eq!(doc.monitor(ws("D")), None);
+        assert!(
+            !empty.contains("workspaces"),
+            "workspaces key should drop:\n{empty}"
+        );
+        assert!(spaceman::config::Config::parse(&empty).is_ok());
+    }
+}
+
+#[test]
+fn choosing_main_in_settings_retains_solely_declared_named_workspace() {
+    let d = ws("D");
+    for source in [
+        "version = 1\n[[workspaces]]\nworkspace = \"D\"\nmonitor = \"secondary\"\n",
+        "version = 1\nworkspaces = [{ workspace = \"D\", monitor = \"secondary\" }]\n",
+    ] {
+        let mut doc = Doc::parse(source);
+        assert_eq!(doc.error, None, "{source}");
+        assert_eq!(doc.monitor(d).as_deref(), Some("secondary"));
+
+        // Choosing Main in Settings passes `None` to `set_monitor`.
+        doc.set_monitor(d, None);
+        let saved = doc.source();
+        let config = spaceman::config::Config::parse(&saved)
+            .unwrap_or_else(|err| panic!("invalid TOML ({err}):\n{saved}"));
+        let mut workspaces = spaceman::Workspaces::default();
+        config.configure_workspaces(&mut workspaces);
+        assert!(
+            workspaces.is_enabled(d),
+            "named workspace D must stay enabled:\n{saved}"
+        );
+        assert_eq!(
+            workspaces.assignment(d),
+            &spaceman::DisplaySelector::Main,
+            "{saved}"
+        );
+        let reloaded = Doc::parse(&saved);
+        assert!(
+            reloaded
+                .workspaces_with_referenced(WorkspaceId::numbered())
+                .contains(&d),
+            "Settings row for D must remain visible:\n{saved}"
+        );
+        assert_eq!(reloaded.monitor(d).as_deref(), Some("main"));
+
+        // Clearing an unconfigured named workspace does not declare it.
+        doc.set_monitor(ws("Z"), None);
+        assert!(!doc.named_workspaces().contains(&ws("Z")));
+    }
+
+    // Control: when a route rule also references D, choosing Main removes the redundant entry
+    // while keeping D enabled through the route rule.
+    let mut routed = Doc::parse(concat!(
+        "version = 1\n",
+        "[[workspaces]]\n",
+        "workspace = \"D\"\n",
+        "monitor = \"secondary\"\n",
+        "[[rules]]\n",
+        "title = \"Synthetic\"\n",
+        "action = \"route\"\n",
+        "workspace = \"D\"\n",
+    ));
+    routed.set_monitor(d, None);
+    let saved = routed.source();
+    assert!(!saved.contains("[[workspaces]]"), "{saved}");
+    let config = spaceman::config::Config::parse(&saved).unwrap();
+    let mut workspaces = spaceman::Workspaces::default();
+    config.configure_workspaces(&mut workspaces);
+    assert!(workspaces.is_enabled(d));
+    assert!(
+        Doc::parse(&saved)
+            .workspaces_with_referenced(WorkspaceId::numbered())
+            .contains(&d)
+    );
+}
+
+#[test]
+fn doc_edit_and_save_preserves_external_edits_symlinks_and_detects_conflicts() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "spaceman-agent-doc-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("dotfiles.toml");
+    let link = dir.join("config.toml");
+    std::fs::write(
+        &target,
+        concat!(
+            "version = 1\n\n",
+            "[settings]\n",
+            "hud = true\n\n",
+            "[[rules]]\n",
+            "bundle_id = \"com.apple.TextEdit\"\n",
+            "action = \"route\"\n",
+            "workspace = 1\n",
+        ),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("dotfiles.toml", &link).unwrap();
+
+    let mut doc = Doc::load_from(link.clone());
+    let dragged = doc.rules()[0].clone();
+
+    // Simulate an external save changing hud = true -> hud = false while the user holds the card.
+    std::fs::write(
+        &target,
+        concat!(
+            "version = 1\n\n",
+            "[settings]\n",
+            "hud = false\n\n",
+            "[[rules]]\n",
+            "bundle_id = \"com.apple.TextEdit\"\n",
+            "action = \"route\"\n",
+            "workspace = 1\n",
+        ),
+    )
+    .unwrap();
+
+    doc.edit_and_save(|fresh| fresh.place_matching(&dragged, Place::Workspace(ws("2"))))
+        .unwrap();
+
+    // Symlink stays intact and both the external HUD edit and workspace move survive.
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let on_disk = std::fs::read_to_string(&target).unwrap();
+    let parsed = spaceman::config::Config::parse(&on_disk).unwrap();
+    assert!(
+        !parsed.hud(),
+        "external hud = false must survive:\n{on_disk}"
+    );
+    assert!(!doc.hud());
+    assert_eq!(doc.rules()[0].place, Place::Workspace(ws("2")));
+
+    // Shifted index: external edit inserts a new rule above TextEdit before another move.
+    let dragged_again = doc.rules()[0].clone();
+    std::fs::write(
+        &target,
+        concat!(
+            "version = 1\n\n",
+            "[settings]\n",
+            "hud = false\n\n",
+            "[[rules]]\n",
+            "bundle_id = \"com.apple.Safari\"\n",
+            "action = \"float\"\n\n",
+            "[[rules]]\n",
+            "bundle_id = \"com.apple.TextEdit\"\n",
+            "action = \"route\"\n",
+            "workspace = 2\n",
+        ),
+    )
+    .unwrap();
+    doc.edit_and_save(|fresh| fresh.place_matching(&dragged_again, Place::Workspace(ws("3"))))
+        .unwrap();
+    assert_eq!(doc.rules().len(), 2);
+    assert_eq!(
+        doc.rules()[0].bundle_id.as_deref(),
+        Some("com.apple.Safari")
+    );
+    assert_eq!(doc.rules()[0].place, Place::Float);
+    assert_eq!(
+        doc.rules()[1].bundle_id.as_deref(),
+        Some("com.apple.TextEdit")
+    );
+    assert_eq!(doc.rules()[1].place, Place::Workspace(ws("3")));
+
+    // Conflict: external edit deletes TextEdit's rule and changes hud back to true.
+    let stale_rule = doc.rules()[1].clone();
+    std::fs::write(
+        &target,
+        concat!(
+            "version = 1\n\n",
+            "[settings]\n",
+            "hud = true\n\n",
+            "[[rules]]\n",
+            "bundle_id = \"com.apple.Safari\"\n",
+            "action = \"float\"\n",
+        ),
+    )
+    .unwrap();
+    let err = doc
+        .edit_and_save(|fresh| fresh.place_matching(&stale_rule, Place::Workspace(ws("4"))))
+        .unwrap_err();
+    assert!(err.contains("changed externally"), "{err}");
+    // External file survives untouched and doc refreshes to match disk so the user can retry.
+    assert!(doc.hud());
+    assert_eq!(doc.rules().len(), 1);
+    assert_eq!(
+        doc.rules()[0].bundle_id.as_deref(),
+        Some("com.apple.Safari")
+    );
+    let disk_after_conflict = std::fs::read_to_string(&target).unwrap();
+    assert!(
+        spaceman::config::Config::parse(&disk_after_conflict)
+            .unwrap()
+            .hud()
+    );
+    assert!(!disk_after_conflict.contains("TextEdit"));
+
+    drop(std::fs::remove_dir_all(dir));
+}
+
+#[test]
+fn empty_inline_workspaces_array_supports_assigning_a_display() {
+    let mut doc = Doc::parse("version = 1\nworkspaces = []\n");
+    assert_eq!(doc.error, None);
+    assert_eq!(doc.monitor(ws("2")), None);
+    doc.set_monitor(ws("2"), Some("secondary"));
+    let saved = doc.source();
+    assert!(
+        spaceman::config::Config::parse(&saved).is_ok(),
+        "invalid TOML:\n{saved}"
+    );
+    assert_eq!(
+        Doc::parse(&saved).monitor(ws("2")).as_deref(),
+        Some("secondary")
+    );
 }

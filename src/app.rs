@@ -55,6 +55,7 @@ mod minimums;
 mod move_workspace;
 mod parking;
 mod runtime;
+mod scratchpad;
 mod state_writer;
 mod switching;
 mod worker;
@@ -82,6 +83,8 @@ use runtime::*;
 use worker::spawn_worker;
 
 pub const TICK_INTERVAL: Duration = Duration::from_millis(25);
+/// Prefix on `UiAgentSnapshot::last_error` when installing a staged update fails.
+pub const UPDATE_FAILED_PREFIX: &str = "Update failed: ";
 /// Retile without an event this often while the user is active...
 const FALLBACK_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// ...and this often once nothing has happened for `RECENT_ACTIVITY`. Each
@@ -211,6 +214,9 @@ pub(crate) enum Action {
 pub(crate) enum WorkerAction {
     Retile,
     SwitchWorkspace(WorkspaceId),
+    /// Pointer-initiated workspace selection from the status menu or Workspace HUD:
+    /// switches and focuses without triggering mouse-follows-focus warping.
+    SelectWorkspace(WorkspaceId),
     WorkspaceBackAndForth,
     MoveWorkspaceToDisplay(DisplayTarget),
     /// A trackpad swipe, stepping through the occupied workspaces of the display
@@ -229,13 +235,17 @@ pub(crate) enum WorkerAction {
     ToggleFloat,
     /// Kit noticed something wrong: mark the journal and snapshot it.
     MarkWrong,
+    /// The Scratchpad Lab: summon or hide, or send a window to or from it.
+    Scratchpad(crate::scratchpad::ScratchpadCommand),
 }
 
 impl WorkerAction {
     fn queued_acknowledgement(&self) -> String {
         match self {
             Self::Retile => "retile queued".into(),
-            Self::SwitchWorkspace(workspace) => format!("switch to workspace {workspace} queued"),
+            Self::SwitchWorkspace(workspace) | Self::SelectWorkspace(workspace) => {
+                format!("switch to workspace {workspace} queued")
+            }
             Self::WorkspaceBackAndForth => "workspace back-and-forth queued".into(),
             Self::MoveWorkspaceToDisplay(_) => "move workspace to display queued".into(),
             Self::Swipe(..) => "swipe queued".into(),
@@ -250,6 +260,7 @@ impl WorkerAction {
             Self::ToggleFullscreenLayout => "fullscreen layout toggle queued".into(),
             Self::ToggleFloat => "float toggle queued".into(),
             Self::MarkWrong => "marking the journal".into(),
+            Self::Scratchpad(command) => format!("scratchpad {} queued", command.as_str()),
         }
     }
 }
@@ -330,6 +341,7 @@ pub struct PreparedAgent {
     cancelled: Arc<AtomicBool>,
     scope: ManagementScope,
     hotkey_workspaces: Vec<WorkspaceId>,
+    shortcuts: crate::shortcuts::Shortcuts,
     hud: bool,
     controls: Receiver<ControlRequest>,
     control_server: control::Server,
@@ -341,13 +353,14 @@ pub fn prepare() -> Result<(PreparedAgent, UiBridge), String> {
     log_event!(
         "agent started (pid {}, version {})",
         std::process::id(),
-        env!("CARGO_PKG_VERSION")
+        crate::updater::build_version()
     );
     let scope = ManagementScope::from_environment()?;
     let parked = load_parked()?;
     let (config, workspace_state) =
         recover_startup_metadata(Config::load(), load_workspace_state());
     let hud = config.hud();
+    let shortcuts = config.shortcuts().clone();
     let mut configured_workspaces = Workspaces::default();
     config.configure_workspaces(&mut configured_workspaces);
     let mut hotkey_workspaces = WorkspaceId::numbered()
@@ -394,6 +407,7 @@ pub fn prepare() -> Result<(PreparedAgent, UiBridge), String> {
             cancelled,
             scope,
             hotkey_workspaces,
+            shortcuts,
             hud,
             controls,
             control_server,
@@ -455,6 +469,7 @@ impl PreparedAgent {
                 scope: self.scope,
                 events,
                 hotkey_workspaces: self.hotkey_workspaces,
+                shortcuts: self.shortcuts,
                 hud: self.hud,
                 trusted,
                 setup_tour_open,

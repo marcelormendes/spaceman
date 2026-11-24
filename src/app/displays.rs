@@ -43,17 +43,19 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         let visible_workspaces: HashSet<_> =
             visible.iter().map(|resolved| resolved.workspace).collect();
+        let displays: Vec<_> = outputs.frames().collect();
         let reassigned = std::mem::take(&mut self.displays.reassigned);
         for (workspace, attempts) in reassigned {
             let new_output = output_for(&self.workspaces, workspace, outputs);
             let is_visible = visible_workspaces.contains(&workspace);
             let mut any_failed = false;
             for window in self.workspaces.windows(workspace) {
+                if self.scratchpad.contains(&window) {
+                    continue;
+                }
                 if let Some(original) = self.parked.get(&window).copied() {
                     if !new_output.contains_center(original)
-                        && let Some(from_output) = outputs
-                            .frames()
-                            .find(|display| display.contains_center(original))
+                        && let Some(from_output) = Self::display_for_frame(original, &displays)
                     {
                         let relocated = super::move_workspace::translate_frame_to_output(
                             original,
@@ -74,11 +76,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         .or_else(|| self.backend.frame(&window).ok());
                     if current.is_none_or(|frame| !new_output.contains_center(frame)) {
                         let from_output = current
-                            .and_then(|frame| {
-                                outputs
-                                    .frames()
-                                    .find(|display| display.contains_center(frame))
-                            })
+                            .and_then(|frame| Self::display_for_frame(frame, &displays))
                             .unwrap_or_else(|| outputs.main().frame);
                         if !self.carry_floating_window(&window, from_output, new_output) {
                             *failed += 1;
@@ -129,17 +127,26 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .collect();
         let displays: Vec<_> = outputs.frames().collect();
         for window in std::mem::take(&mut self.displays.repark_pending) {
-            // Unowned windows are restored by the cycle, visible ones revealed.
-            let Some(owner) = self.workspaces.workspace_of_any(&window) else {
-                continue;
-            };
-            if !self.parked.contains_key(&window)
-                || visible.contains(&owner)
-                || self.parking_exempt.contains(&window)
-            {
+            if !self.parked.contains_key(&window) || self.parking_exempt.contains(&window) {
                 continue;
             }
-            if !self.repark_for_displays(&window, owner, outputs, &displays) {
+            // Hidden scratchpad windows intentionally have no workspace owner, but still need to
+            // stay parked off-screen when a newly connected display covers their parking edge.
+            let output = if let Some(owner) = self.workspaces.workspace_of_any(&window) {
+                if visible.contains(&owner) {
+                    continue;
+                }
+                output_for(&self.workspaces, owner, outputs)
+            } else if self
+                .scratchpad
+                .entry(&window)
+                .is_some_and(|entry| entry.shown_on.is_none())
+            {
+                outputs.main().frame
+            } else {
+                continue;
+            };
+            if !self.repark_for_displays(&window, output, &displays) {
                 self.displays.repark_pending.insert(window);
             }
         }
@@ -149,14 +156,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     fn repark_for_displays(
         &mut self,
         window: &crate::PhysicalWindowId,
-        owner: WorkspaceId,
-        outputs: &macos::DisplayOutputs,
+        output: crate::Rect,
         displays: &[crate::Rect],
     ) -> bool {
         let Some(current) = self.backend.window_server_frame(window) else {
             return false;
         };
-        let output = output_for(&self.workspaces, owner, outputs);
         let target = crate::geometry::parked_frame(output, displays, current);
         if (target.x, target.y) == (current.x, current.y) {
             return true;
@@ -176,6 +181,136 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.displays.repark_pending.contains(window)
     }
 
+    /// Recover visible, non-parked owned windows whose on-screen window-server
+    /// center sits outside every connected display (for example, macOS leaving
+    /// a visible window with a bottom-right sliver after disconnecting a larger
+    /// external display). Runs before `snapshot` so the window is observed back
+    /// on its display instead of omitted and retired.
+    pub(super) fn recover_stranded_visible(
+        &mut self,
+        outputs: &macos::DisplayOutputs,
+        visible: &[ResolvedWorkspace],
+        server_frames: &HashMap<u32, crate::Rect>,
+        cancelled: &AtomicBool,
+        failed: &mut usize,
+    ) {
+        if cancelled.load(Ordering::Acquire) || self.backend.mouse_down() {
+            return;
+        }
+        let displays: Vec<_> = outputs.frames().collect();
+        let has_candidate = visible.iter().any(|resolved| {
+            self.scope.manages_selector(&resolved.selector)
+                && self
+                    .workspaces
+                    .windows(resolved.workspace)
+                    .into_iter()
+                    .any(|window| {
+                        !self.parked.contains_key(&window)
+                            && server_frames.get(&window.window_id).is_some_and(|frame| {
+                                !displays
+                                    .iter()
+                                    .any(|display| display.contains_center(*frame))
+                            })
+                    })
+        });
+        if !has_candidate {
+            return;
+        }
+        let Some(onscreen_frames) = self.backend.onscreen_window_frames() else {
+            return;
+        };
+        for resolved in visible {
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            if !self.scope.manages_selector(&resolved.selector) {
+                continue;
+            }
+            let workspace = resolved.workspace;
+            let output = resolved.output;
+            let settings = self.layout_settings(output);
+            let engine = self.workspaces.engine_mut(workspace);
+            engine.fit_minimums(&settings, &self.minimum_sizes);
+            let mut placements = engine.placements(&settings);
+            self.apply_fullscreen_layout(workspace, &mut placements, &settings);
+            let mut recover_tiles = Vec::new();
+            for placement in placements {
+                let Some(window) = placement.window.as_ref() else {
+                    continue;
+                };
+                if self.parked.contains_key(window) {
+                    continue;
+                }
+                let Some(&frame) = onscreen_frames.get(&window.window_id) else {
+                    continue;
+                };
+                if displays
+                    .iter()
+                    .any(|display| display.contains_center(frame))
+                {
+                    continue;
+                }
+                log_event!(
+                    "recover stranded tiled {:?} on workspace {} from {:?} to {:?}",
+                    window,
+                    workspace,
+                    frame,
+                    placement.frame
+                );
+                recover_tiles.push(placement);
+            }
+            if !recover_tiles.is_empty() {
+                let results = self
+                    .backend
+                    .apply_managed(&recover_tiles, &settings, cancelled);
+                self.record_results(workspace, &results);
+                let initially_failed = failed_results(&results);
+                *failed += self
+                    .refit_minimum_sizes(workspace, output, results, cancelled)
+                    .map_or(initially_failed, |status| status.failed);
+            }
+            let floating: Vec<_> = self
+                .workspaces
+                .floating_entries()
+                .filter(|(_, owner)| *owner == workspace)
+                .map(|(window, _)| window.clone())
+                .collect();
+            for window in floating {
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                if self.parked.contains_key(&window) {
+                    continue;
+                }
+                let Some(&frame) = onscreen_frames.get(&window.window_id) else {
+                    continue;
+                };
+                if displays
+                    .iter()
+                    .any(|display| display.contains_center(frame))
+                {
+                    continue;
+                }
+                let target = clamp_into_output(frame, output);
+                let outcome = self.backend.set_position(&window, target);
+                log_event!(
+                    "recover stranded floating {:?} on workspace {} from {:?} to {:?} ({:?})",
+                    window,
+                    workspace,
+                    frame,
+                    target,
+                    outcome
+                );
+                if !matches!(
+                    outcome,
+                    macos::ApplyOutcome::Applied | macos::ApplyOutcome::Gone
+                ) {
+                    *failed += 1;
+                }
+            }
+        }
+    }
+
     /// Where a recovery frame is restored: itself while it shows on a connected
     /// display, otherwise moved onto the main display (its own is gone).
     pub(super) fn restore_target(&self, frame: crate::Rect) -> crate::Rect {
@@ -184,5 +319,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         };
         let displays: Vec<_> = outputs.frames().collect();
         crate::geometry::onto_displays(frame, &displays, outputs.main().frame)
+    }
+}
+
+/// Move `frame` (keeping its size) so its top-left sits inside `output`.
+fn clamp_into_output(frame: crate::Rect, output: crate::Rect) -> crate::Rect {
+    crate::Rect {
+        x: frame
+            .x
+            .clamp(output.x, output.x + (output.width - frame.width).max(0)),
+        y: frame
+            .y
+            .clamp(output.y, output.y + (output.height - frame.height).max(0)),
+        ..frame
     }
 }

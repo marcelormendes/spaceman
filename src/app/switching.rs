@@ -9,6 +9,8 @@ const REVEAL_POLL_INTERVAL: Duration = Duration::from_millis(3);
 /// How long a pending reveal waits before the restore write is re-issued.
 const REVEAL_REWRITE_INTERVAL: Duration = Duration::from_millis(100);
 
+use super::commands::{WarpContext, WorkspaceFocusOutcome};
+
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     pub(super) fn switch(
         &mut self,
@@ -36,13 +38,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 self.workspaces.remember_focus(workspace, focused);
                 self.record_focused_workspace(workspace);
                 self.pending_fullscreen_focus_restore.remove(&workspace);
+                let frame = self.focus_window_frame(focused, workspace, output);
+                self.follow_pointer_to(&display_id, output, frame, &outputs);
                 self.persist_workspace_state_if_changed()?;
                 let mut status = self.status(0, &outputs);
                 status.hud = Some(self.hud_for(workspace, UiHudKind::Workspace, None, &outputs));
                 return Ok(status);
             }
             let frontmost = self.backend.frontmost_application();
-            self.focus_workspace_entry(workspace, &windows, focused, frontmost);
+            // A tile of this workspace that already has focus keeps it; only
+            // focus elsewhere moves to the remembered tile.
+            let outcome = self.focus_workspace_entry(workspace, &windows, focused, frontmost, true);
+            self.follow_pointer_for_workspace(workspace, output, outcome, &outputs);
             // Selecting a workspace that is already up still moves focus there
             // when it lives on another display, so it belongs in the history.
             self.record_focused_workspace(workspace);
@@ -182,10 +189,27 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
+        let focus_already_in_workspace = focused_before
+            .as_ref()
+            .is_some_and(|window| self.workspaces.workspace_of_any(window) == Some(workspace))
+            || frontmost_before
+                .as_ref()
+                .is_some_and(|app| self.workspaces.workspace_for_app(app) == Some(workspace));
         self.workspaces.switch(workspace);
         self.record_focused_workspace(workspace);
         self.foreground_lanes.insert(display_id, selector);
-        self.focus_workspace_entry(workspace, &incoming, focused_before, frontmost_before);
+        let outcome = self.focus_workspace_entry(
+            workspace,
+            &incoming,
+            focused_before,
+            frontmost_before,
+            true,
+        );
+        if self.warp_context == WarpContext::Explicit
+            || (self.warp_context == WarpContext::Direct && !focus_already_in_workspace)
+        {
+            self.follow_pointer_for_workspace(workspace, output, outcome, &outputs);
+        }
         self.persist_workspace_state_if_changed()?;
         log_event!(
             "switch complete: workspace {} in {}ms",
@@ -204,26 +228,36 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// it would snap the display straight back. Suppression keeps the earlier
     /// stale focus when Accessibility reports none, so switching on through
     /// empty workspaces keeps it too.
+    ///
+    /// With `keep_reported`, a window of the workspace that already has focus
+    /// is the entry window: a hidden workspace revealed because one of its
+    /// windows took focus (a notification click, the Dock, Cmd+Tab) must not
+    /// hand focus to its remembered tile instead.
     pub(super) fn focus_workspace_entry(
         &mut self,
         workspace: WorkspaceId,
         windows: &[crate::PhysicalWindowId],
         focused: Option<crate::PhysicalWindowId>,
         frontmost: Option<crate::AppInstanceId>,
-    ) {
-        let reported_inside = focused
-            .as_ref()
-            .is_some_and(|window| windows.contains(window));
+        keep_reported: bool,
+    ) -> WorkspaceFocusOutcome {
+        let reported_window = focused.as_ref().filter(|window| windows.contains(window));
+        let reported_inside = reported_window.is_some();
+        let workspace_focus = reported_window
+            .filter(|_| keep_reported)
+            .cloned()
+            .or_else(|| {
+                self.workspaces
+                    .preferred_focus(workspace)
+                    .filter(|window| windows.contains(window))
+            })
+            .or_else(|| windows.first().cloned());
         let stale_window = focused.or_else(|| self.suppressed_focus.clone());
         let stale_app = frontmost.or_else(|| self.suppressed_app.clone());
-        let workspace_focus = self
-            .workspaces
-            .preferred_focus(workspace)
-            .filter(|window| windows.contains(window))
-            .or_else(|| windows.first().cloned());
-        if let Some(window) = workspace_focus {
+        let outcome = if let Some(window) = workspace_focus {
             if self.backend.focus_window(&window) {
                 self.pending_fullscreen_focus_restore.remove(&workspace);
+                WorkspaceFocusOutcome::Focused(window)
             } else {
                 // Keys may still be in the app focus left; the pending restore
                 // stays so the next cycle tries again.
@@ -232,8 +266,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     workspace,
                     window
                 );
+                WorkspaceFocusOutcome::Failed
             }
-        }
+        } else {
+            WorkspaceFocusOutcome::Empty
+        };
         // Focus already inside the workspace (focus follow switched to it) is
         // where the display is going, not focus left behind. Only the focus
         // Accessibility reports now proves that: an earlier suppressed window
@@ -244,6 +281,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             self.suppressed_focus = stale_window.filter(|window| !windows.contains(window));
             self.suppressed_app = stale_app;
         }
+        outcome
     }
 
     pub(super) fn clear_suppressed_focus(&mut self) {
@@ -471,15 +509,24 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: &macos::DisplayOutputs,
     ) -> Result<CycleStatus, String> {
         let windows = self.workspaces.windows(workspace);
+        let output = output_for(&self.workspaces, workspace, outputs);
         if !windows.is_empty() {
             let focused = self.backend.focused_window();
             let frontmost = self.backend.frontmost_application();
-            self.focus_workspace_entry(workspace, &windows, focused, frontmost);
+            let outcome =
+                self.focus_workspace_entry(workspace, &windows, focused, frontmost, false);
+            self.follow_pointer_for_workspace(workspace, output, outcome, outputs);
             self.record_focused_workspace(workspace);
             log_event!(
                 "back-and-forth: focused visible workspace {} without switching",
                 workspace
             );
+        } else {
+            let target_display_id = outputs
+                .resolve(self.workspaces.assignment(workspace))
+                .id
+                .as_str();
+            self.follow_pointer_to(target_display_id, output, None, outputs);
         }
         let mut status = self.status(0, outputs);
         status.hud = Some(self.hud_for(workspace, UiHudKind::Workspace, from, outputs));
@@ -496,13 +543,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
         self.synchronize_foreground(&outputs);
-        let display_id = outputs
-            .displays()
-            .iter()
-            .find(|display| display.frame.contains(point.0, point.1))
-            .unwrap_or_else(|| outputs.main())
-            .id
-            .clone();
+        let display_id = outputs.display_for_point(point).id.clone();
         let current = self
             .visible_workspaces(&outputs)
             .into_iter()
@@ -517,7 +558,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 Swipe::Right => index.checked_sub(1).and_then(|index| listed.get(index)),
             });
         match target {
-            Some(&target) => self.switch(target, outputs, cancelled),
+            Some(&target) => self.with_warp_context(WarpContext::Suppressed, |rt| {
+                rt.switch(target, outputs, cancelled)
+            }),
             None => Ok(self.status(0, &outputs)),
         }
     }
@@ -544,21 +587,33 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     ) -> Result<CycleStatus, String> {
         let mut windows = self.windows_for_bundle(bundle_id);
         if windows.is_empty() {
-            self.cycle(outputs.clone(), cancelled)?;
+            self.with_warp_context(WarpContext::Suppressed, |rt| {
+                rt.cycle(outputs.clone(), cancelled)
+            })?;
             windows = self.windows_for_bundle(bundle_id);
         }
-        match windows.as_slice() {
-            [] => Err(format!("No managed window found for {bundle_id}")),
-            [window] => self.move_window(window.clone(), target, outputs, cancelled),
-            _ => Err(format!(
-                "{bundle_id} has multiple managed windows; use move on the focused window"
-            )),
+        let mut status: Option<CycleStatus> = None;
+        for window in windows {
+            let mut moved = self.with_warp_context(WarpContext::Suppressed, |rt| {
+                rt.move_window(window, target, outputs.clone(), cancelled)
+            })?;
+            moved.failed += status.map_or(0, |earlier| earlier.failed);
+            status = Some(moved);
         }
+        status.ok_or_else(|| format!("No managed window found for {bundle_id}"))
     }
 
+    /// Every window of the bundle Spaceman owns: its tiles, then its floats.
     fn windows_for_bundle(&self, bundle_id: &str) -> Vec<crate::PhysicalWindowId> {
+        let mut floating: Vec<_> = self
+            .workspaces
+            .floating_entries()
+            .map(|(window, _)| window.clone())
+            .collect();
+        floating.sort();
         WorkspaceId::all()
             .flat_map(|workspace| self.workspaces.engine(workspace).bound_windows())
+            .chain(floating)
             .filter(|window| self.bundle_id(&window.app) == Some(bundle_id))
             .collect()
     }
@@ -574,7 +629,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let source = if let Some(source) = self.workspaces.workspace_of_any(&window) {
             source
         } else {
-            self.cycle(outputs.clone(), cancelled)?;
+            self.with_warp_context(WarpContext::Suppressed, |rt| {
+                rt.cycle(outputs.clone(), cancelled)
+            })?;
             self.workspaces
                 .workspace_of_any(&window)
                 .ok_or("Window is not managed by Spaceman")?
@@ -585,12 +642,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let is_floating = self.workspaces.floating_workspace_of(&window).is_some();
         let source_output = output_for(&self.workspaces, source, &outputs);
         let target_output = output_for(&self.workspaces, target, &outputs);
+        let window_output = if is_floating {
+            self.window_display_output(&window, &outputs)
+                .unwrap_or(source_output)
+        } else {
+            source_output
+        };
         let target_is_active = self.is_visible(target, &outputs);
         if !target_is_active {
-            let parked = if source_output == target_output {
+            let parked = if window_output == target_output {
                 self.park_window(&window, target_output, &outputs)
             } else {
-                self.park_window_across(&window, source_output, target_output, &outputs)
+                self.park_window_across(&window, window_output, target_output, &outputs)
             };
             if !matches!(parked, macos::ApplyOutcome::Applied) {
                 return Err("Window could not be parked in the target workspace".into());
@@ -628,8 +691,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             if !is_floating {
                 let layout = self.layout_workspace(target, target_output, cancelled);
                 failed += layout.failed;
-            } else if source_output != target_output
-                && !self.carry_floating_window(&window, source_output, target_output)
+            } else if window_output != target_output
+                && !self.carry_floating_window(&window, window_output, target_output)
             {
                 failed += 1;
             }
@@ -637,6 +700,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 // Focus followed the window to the workspace on screen
                 // elsewhere; Option+Tab goes back to where it came from.
                 self.record_focused_workspace(target);
+                let frame = self.focus_window_frame(&window, target, target_output);
+                let target_display_id = outputs
+                    .resolve(self.workspaces.assignment(target))
+                    .id
+                    .as_str();
+                self.follow_pointer_to(target_display_id, target_output, frame, &outputs);
             } else {
                 log_event!("move focus follow failed for {:?}", window);
             }

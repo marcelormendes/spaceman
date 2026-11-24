@@ -385,7 +385,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
 
         let moved_windows = self.workspaces.windows(moved_ws);
-        self.focus_workspace_entry(moved_ws, &moved_windows, focused_window, frontmost_before);
+        let outcome = self.focus_workspace_entry(
+            moved_ws,
+            &moved_windows,
+            focused_window,
+            frontmost_before,
+            false,
+        );
+        self.follow_pointer_for_workspace(moved_ws, target_output, outcome, &outputs);
         self.persist_workspace_state_if_changed()?;
         log_event!(
             "move-workspace complete: workspace {} -> {} in {}ms",

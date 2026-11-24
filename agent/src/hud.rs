@@ -163,14 +163,6 @@ impl HudOverlay {
         self.schedule_wake(self.now_ms(), tx);
     }
 
-    pub(super) fn open_settings(&mut self, tx: &mut Tx) {
-        let now_ms = self.now_ms();
-        self.sink.open_settings();
-        if self.flow.leave_now(now_ms) {
-            tx.wake_after(Duration::from_millis(LEAVE_MS));
-        }
-    }
-
     pub(super) fn open_app_menu(
         &mut self,
         workspace: WorkspaceId,

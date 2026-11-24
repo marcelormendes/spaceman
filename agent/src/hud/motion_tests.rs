@@ -727,7 +727,6 @@ fn the_widest_capsule_and_its_shadow_fit_the_panel() {
 #[derive(Default)]
 struct RecordingSink {
     switched: Mutex<Vec<WorkspaceId>>,
-    settings_opens: Mutex<usize>,
     doc: Mutex<Option<Doc>>,
 }
 
@@ -735,7 +734,6 @@ impl RecordingSink {
     fn new() -> Self {
         Self {
             switched: Mutex::new(Vec::new()),
-            settings_opens: Mutex::new(0),
             doc: Mutex::new(Some(Doc::parse("version = 1\n"))),
         }
     }
@@ -752,10 +750,6 @@ impl RecordingSink {
 impl HudSink for RecordingSink {
     fn switch_workspace(&self, workspace: WorkspaceId) {
         self.switched.lock().unwrap().push(workspace);
-    }
-
-    fn open_settings(&self) {
-        *self.settings_opens.lock().unwrap() += 1;
     }
 
     fn app_place(&self, bundle_id: &str) -> Option<Place> {
@@ -799,7 +793,7 @@ fn hovering_the_pill_holds_it_open_and_leaving_resumes_a_clean_exit() {
 }
 
 #[test]
-fn clicking_a_workspace_slot_switches_it_and_gear_opens_settings() {
+fn clicking_a_workspace_slot_switches_it() {
     for style in STYLES {
         let sink = Arc::new(RecordingSink::new());
         let mut hud = Hud::with_sink(style, row(1, None), false, sink.clone());
@@ -812,17 +806,11 @@ fn clicking_a_workspace_slot_switches_it_and_gear_opens_settings() {
         hud.run.rt.pointer_up(wx, wy);
         hud.step();
         assert_eq!(*sink.switched.lock().unwrap(), vec![id(3)], "{style:?}");
-
-        let (gx, gy) = hud.center_of("hud-settings");
-        hud.run.rt.pointer_move(gx, gy);
-        hud.step();
-        hud.run.rt.pointer_down(gx, gy);
-        hud.run.rt.pointer_up(gx, gy);
-        hud.step();
-        assert_eq!(*sink.settings_opens.lock().unwrap(), 1, "{style:?}");
-        // Opening Settings glides the pill out cleanly.
-        hud.play_until(HudTick::Gone);
-        hud.play(550);
+        assert!(
+            hud.try_snaps("hud-settings", 0).is_none(),
+            "{style:?}: HUD capsule should not render a trailing Settings gear"
+        );
+        hud.play(200);
         assert_eq!(hud.findings(), Vec::<String>::new(), "{style:?}");
     }
 }

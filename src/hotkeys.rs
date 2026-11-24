@@ -1,6 +1,11 @@
 mod delivery;
 
-use std::{collections::BTreeMap, ffi::c_void, ptr, sync::mpsc::Sender};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::c_void,
+    ptr,
+    sync::mpsc::Sender,
+};
 
 pub(crate) use delivery::DeliveryWatch;
 
@@ -8,6 +13,8 @@ use crate::{
     Direction, DisplayTarget, ResizeDirection, WorkspaceId,
     app::{Action, WorkerAction},
     keyboard_layout::{LayoutFingerprint, LayoutSnapshot, LogicalKey, SemanticKey},
+    scratchpad::ScratchpadCommand,
+    shortcuts::{self, Binding, Command, Shortcuts},
 };
 
 const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
@@ -71,6 +78,8 @@ pub struct Hotkeys {
     layout_fingerprint: LayoutFingerprint,
     /// A hotkey's ID is its index here.
     bindings: Vec<Registration>,
+    /// Shortcuts the plan or Carbon skipped while the rest registered, for the log.
+    skipped: Vec<String>,
 }
 
 /// Read by the Carbon handler.
@@ -96,113 +105,27 @@ struct Registration {
 }
 
 impl HotkeyPlan {
-    pub(crate) fn current(enabled: &[WorkspaceId]) -> Result<Self, String> {
+    pub(crate) fn current(enabled: &[WorkspaceId], shortcuts: &Shortcuts) -> Result<Self, String> {
         let layout = LayoutSnapshot::current().map_err(|error| error.to_string())?;
-        Self::from_layout(enabled, &layout)
+        Self::from_layout(enabled, shortcuts, &layout)
     }
 
-    fn from_layout(enabled: &[WorkspaceId], layout: &LayoutSnapshot) -> Result<Self, String> {
-        let mut plan = PlanBuilder::new(layout, 16 + enabled.len() * 2);
-        let claimed_letters = enabled
-            .iter()
-            .filter_map(|workspace| workspace.letter().map(|letter| letter.to_ascii_lowercase()))
-            .collect::<Vec<_>>();
-        for workspace in WorkspaceId::all().filter(|workspace| enabled.contains(workspace)) {
-            let key = match (workspace.number(), workspace.letter()) {
-                (Some(number), _) => LogicalKey::Semantic(SemanticKey::Workspace(number)),
-                (_, Some(letter)) => LogicalKey::Character(letter.to_ascii_lowercase()),
-                _ => unreachable!("workspace ID is always valid"),
-            };
-            plan.push(
-                key,
-                OPTION_KEY,
-                WorkerAction::SwitchWorkspace(workspace),
-                format!("switch workspace {workspace}"),
-            );
-            plan.push(
-                key,
-                OPTION_KEY | SHIFT_KEY,
-                WorkerAction::MoveFocused(workspace),
-                format!("move window to workspace {workspace}"),
-            );
+    pub(crate) fn from_layout(
+        enabled: &[WorkspaceId],
+        shortcuts: &Shortcuts,
+        layout: &LayoutSnapshot,
+    ) -> Result<Self, String> {
+        let mut plan = PlanBuilder::new(layout, 18 + enabled.len() * 2 + shortcuts.bindings.len());
+        // `[shortcuts]` bindings claim their chords first, so a built-in shortcut on the same
+        // chord quietly gives way instead of colliding.
+        for binding in &shortcuts.bindings {
+            plan.push_binding(binding, enabled);
         }
-        for (character, direction, name) in [
-            ('h', Direction::Left, "left"),
-            ('j', Direction::Down, "down"),
-            ('k', Direction::Up, "up"),
-            ('l', Direction::Right, "right"),
-        ] {
-            if claimed_letters.contains(&character) {
-                continue;
-            }
-            plan.push(
-                LogicalKey::Character(character),
-                OPTION_KEY,
-                WorkerAction::Focus(direction),
-                format!("focus {name}"),
-            );
-            plan.push(
-                LogicalKey::Character(character),
-                OPTION_KEY | SHIFT_KEY,
-                WorkerAction::Reorder(direction),
-                format!("move window {name}"),
-            );
+        if shortcuts.defaults {
+            push_defaults(&mut plan, enabled, carbon_modifiers(shortcuts.modifier));
         }
-        for (key, modifiers, action, description) in [
-            (
-                LogicalKey::Character('f'),
-                OPTION_KEY | SHIFT_KEY,
-                WorkerAction::ToggleFullscreenLayout,
-                "toggle fullscreen layout",
-            ),
-            (
-                LogicalKey::Semantic(SemanticKey::Space),
-                OPTION_KEY | SHIFT_KEY,
-                WorkerAction::ToggleFloat,
-                "toggle floating window",
-            ),
-            (
-                LogicalKey::Character('/'),
-                OPTION_KEY,
-                WorkerAction::ToggleLayout,
-                "toggle layout",
-            ),
-            (
-                LogicalKey::Character('`'),
-                OPTION_KEY,
-                WorkerAction::CycleFocus,
-                "cycle workspace windows",
-            ),
-            (
-                LogicalKey::Semantic(SemanticKey::Tab),
-                OPTION_KEY,
-                WorkerAction::WorkspaceBackAndForth,
-                "workspace back-and-forth",
-            ),
-            (
-                LogicalKey::Semantic(SemanticKey::Tab),
-                OPTION_KEY | SHIFT_KEY,
-                WorkerAction::MoveWorkspaceToDisplay(DisplayTarget::Next),
-                "move workspace to next display",
-            ),
-            (
-                LogicalKey::Character('-'),
-                OPTION_KEY,
-                WorkerAction::Resize(ResizeDirection::Shrink),
-                "shrink layout",
-            ),
-            (
-                LogicalKey::Character('='),
-                OPTION_KEY,
-                WorkerAction::Resize(ResizeDirection::Grow),
-                "grow layout",
-            ),
-        ] {
-            if matches!(key, LogicalKey::Character(character) if claimed_letters.contains(&character))
-            {
-                continue;
-            }
-            plan.push(key, modifiers, action, description);
+        if shortcuts.scratchpad {
+            push_scratchpad(&mut plan);
         }
 
         if plan.registrations.is_empty() {
@@ -221,6 +144,188 @@ impl HotkeyPlan {
     pub(crate) fn matches(&self, hotkeys: &Hotkeys) -> bool {
         self.layout_fingerprint == hotkeys.layout_fingerprint
     }
+
+    #[cfg(test)]
+    pub(crate) fn has_registration(
+        &self,
+        key_code: u32,
+        modifiers: u32,
+        action: &WorkerAction,
+    ) -> bool {
+        self.registrations.iter().any(|registration| {
+            registration.key_code == key_code
+                && registration.modifiers == modifiers
+                && registration.action == *action
+        })
+    }
+}
+
+/// The built-in shortcuts, in priority order.
+/// `base` is `[shortcuts] modifier`'s Carbon modifiers; Move shortcuts add Shift to it.
+fn push_defaults(plan: &mut PlanBuilder<'_>, enabled: &[WorkspaceId], base: u32) {
+    let claimed_letters = enabled
+        .iter()
+        .filter_map(|workspace| workspace.letter().map(|letter| letter.to_ascii_lowercase()))
+        .collect::<Vec<_>>();
+    for workspace in WorkspaceId::all().filter(|workspace| enabled.contains(workspace)) {
+        let key = match (workspace.number(), workspace.letter()) {
+            (Some(number), _) => LogicalKey::Semantic(SemanticKey::Workspace(number)),
+            (_, Some(letter)) => LogicalKey::Character(letter.to_ascii_lowercase()),
+            _ => unreachable!("workspace ID is always valid"),
+        };
+        plan.push(
+            key,
+            base,
+            WorkerAction::SwitchWorkspace(workspace),
+            format!("switch workspace {workspace}"),
+        );
+        plan.push(
+            key,
+            base | SHIFT_KEY,
+            WorkerAction::MoveFocused(workspace),
+            format!("move window to workspace {workspace}"),
+        );
+    }
+    for (character, direction, name) in [
+        ('h', Direction::Left, "left"),
+        ('j', Direction::Down, "down"),
+        ('k', Direction::Up, "up"),
+        ('l', Direction::Right, "right"),
+    ] {
+        if claimed_letters.contains(&character) {
+            continue;
+        }
+        plan.push(
+            LogicalKey::Character(character),
+            base,
+            WorkerAction::Focus(direction),
+            format!("focus {name}"),
+        );
+        plan.push(
+            LogicalKey::Character(character),
+            base | SHIFT_KEY,
+            WorkerAction::Reorder(direction),
+            format!("move window {name}"),
+        );
+    }
+    for (key, modifiers, action, description) in [
+        (
+            LogicalKey::Character('f'),
+            base | SHIFT_KEY,
+            WorkerAction::ToggleFullscreenLayout,
+            "toggle fullscreen layout",
+        ),
+        (
+            LogicalKey::Semantic(SemanticKey::Space),
+            base | SHIFT_KEY,
+            WorkerAction::ToggleFloat,
+            "toggle floating window",
+        ),
+        (
+            LogicalKey::Character('/'),
+            base,
+            WorkerAction::ToggleLayout,
+            "toggle layout",
+        ),
+        (
+            LogicalKey::Character('`'),
+            base,
+            WorkerAction::CycleFocus,
+            "cycle workspace windows",
+        ),
+        (
+            LogicalKey::Semantic(SemanticKey::Tab),
+            base,
+            WorkerAction::WorkspaceBackAndForth,
+            "workspace back-and-forth",
+        ),
+        (
+            LogicalKey::Semantic(SemanticKey::Tab),
+            base | SHIFT_KEY,
+            WorkerAction::MoveWorkspaceToDisplay(DisplayTarget::Next),
+            "move workspace to next display",
+        ),
+        (
+            LogicalKey::Character('-'),
+            base,
+            WorkerAction::Resize(ResizeDirection::Shrink),
+            "shrink layout",
+        ),
+        (
+            LogicalKey::Character('='),
+            base,
+            WorkerAction::Resize(ResizeDirection::Grow),
+            "grow layout",
+        ),
+    ] {
+        if matches!(key, LogicalKey::Character(character) if claimed_letters.contains(&character)) {
+            continue;
+        }
+        plan.push(key, modifiers, action, description);
+    }
+}
+
+/// The Scratchpad Lab's shortcuts, planned only while `[labs] scratchpad` is on so a default
+/// install registers exactly the built-in set.
+fn push_scratchpad(plan: &mut PlanBuilder<'_>) {
+    for (modifiers, command, description) in [
+        (
+            OPTION_KEY,
+            ScratchpadCommand::Toggle,
+            "show or hide the scratchpad",
+        ),
+        (
+            OPTION_KEY | SHIFT_KEY,
+            ScratchpadCommand::Mark,
+            "move window to or from the scratchpad",
+        ),
+    ] {
+        plan.push(
+            LogicalKey::Character('\\'),
+            modifiers,
+            WorkerAction::Scratchpad(command),
+            description,
+        );
+    }
+}
+
+/// The worker action a `[shortcuts]` command queues.
+fn worker_action(command: &Command) -> WorkerAction {
+    match command {
+        Command::Switch(workspace) => WorkerAction::SwitchWorkspace(*workspace),
+        Command::Move(workspace) => WorkerAction::MoveFocused(*workspace),
+        Command::BackAndForth => WorkerAction::WorkspaceBackAndForth,
+        Command::MoveWorkspace(target) => WorkerAction::MoveWorkspaceToDisplay(target.clone()),
+        Command::Focus(direction) => WorkerAction::Focus(*direction),
+        Command::FocusNext => WorkerAction::CycleFocus,
+        Command::MoveDirection(direction) => WorkerAction::Reorder(*direction),
+        Command::Layout => WorkerAction::ToggleLayout,
+        Command::Fullscreen => WorkerAction::ToggleFullscreenLayout,
+        Command::Float => WorkerAction::ToggleFloat,
+        Command::Resize(direction) => WorkerAction::Resize(*direction),
+        Command::Balance => WorkerAction::Balance,
+        Command::Retile => WorkerAction::Retile,
+    }
+}
+
+fn logical_key(key: shortcuts::Key) -> LogicalKey {
+    match key {
+        shortcuts::Key::Character(character) => LogicalKey::Character(character),
+        shortcuts::Key::Number(number) => LogicalKey::Semantic(SemanticKey::Workspace(number)),
+        shortcuts::Key::Code(code) => LogicalKey::Semantic(SemanticKey::KeyCode(code)),
+    }
+}
+
+fn carbon_modifiers(modifiers: shortcuts::Modifiers) -> u32 {
+    [
+        (modifiers.command, COMMAND_KEY),
+        (modifiers.control, CONTROL_KEY),
+        (modifiers.option, OPTION_KEY),
+        (modifiers.shift, SHIFT_KEY),
+    ]
+    .into_iter()
+    .filter(|(held, _)| *held)
+    .fold(0, |bits, (_, bit)| bits | bit)
 }
 
 /// Builds a plan in priority order, keeping the first shortcut that claims a chord and
@@ -231,6 +336,8 @@ struct PlanBuilder<'a> {
     layout: &'a LayoutSnapshot,
     registrations: Vec<Registration>,
     occupied: BTreeMap<(u32, u32), String>,
+    /// Chords a `[shortcuts]` binding claimed (or unbound); built-in shortcuts skip them quietly.
+    user_chords: BTreeSet<(u32, u32)>,
     /// Shortcuts this layout could not map, kept for diagnosis instead of pausing the agent.
     warnings: Vec<String>,
 }
@@ -241,8 +348,60 @@ impl<'a> PlanBuilder<'a> {
             layout,
             registrations: Vec::with_capacity(capacity),
             occupied: BTreeMap::new(),
+            user_chords: BTreeSet::new(),
             warnings: Vec::new(),
         }
+    }
+
+    /// Claims a `[shortcuts]` binding's chord: registers its command, or for `none` only
+    /// reserves the chord so no built-in shortcut takes it.
+    fn push_binding(&mut self, binding: &Binding, enabled: &[WorkspaceId]) {
+        let source = &binding.source;
+        let candidates = match self.layout.candidates(logical_key(binding.chord.key)) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                self.warnings
+                    .push(format!("skipped shortcut {source}: {error}"));
+                return;
+            }
+        };
+        let base = carbon_modifiers(binding.chord.modifiers);
+        let Some(chord) = candidates
+            .into_iter()
+            .map(|candidate| {
+                let shift = if candidate.shift { SHIFT_KEY } else { 0 };
+                (candidate.key_code, base | shift)
+            })
+            .find(|chord| !self.occupied.contains_key(chord))
+        else {
+            self.warnings.push(format!(
+                "skipped shortcut {source}: another shortcut already uses that key"
+            ));
+            return;
+        };
+        self.user_chords.insert(chord);
+        let Some(command) = &binding.command else {
+            self.occupied.insert(chord, format!("{source} (unbound)"));
+            return;
+        };
+        if let Some(workspace) = command.workspace()
+            && !enabled.contains(&workspace)
+        {
+            self.occupied
+                .insert(chord, format!("{source} (unavailable)"));
+            self.warnings.push(format!(
+                "skipped shortcut {source}: workspace {workspace} is not enabled on a managed display"
+            ));
+            return;
+        }
+        let description = command.description();
+        self.occupied.insert(chord, description.clone());
+        self.registrations.push(Registration {
+            key_code: chord.0,
+            modifiers: chord.1,
+            action: worker_action(command),
+            description,
+        });
     }
 
     fn push(
@@ -264,6 +423,10 @@ impl<'a> PlanBuilder<'a> {
         for candidate in candidates {
             let modifiers = modifiers | if candidate.shift { SHIFT_KEY } else { 0 };
             let chord = (candidate.key_code, modifiers);
+            if self.user_chords.contains(&chord) {
+                // A `[shortcuts]` binding replaced this built-in shortcut.
+                return;
+            }
             if self.occupied.contains_key(&chord) {
                 continue;
             }
@@ -318,6 +481,7 @@ impl Hotkeys {
             context: Some(context),
             layout_fingerprint,
             bindings: Vec::new(),
+            skipped: Vec::new(),
         };
         // Shortcuts the layout already skipped are the first reasons a plan can be thin.
         let mut failures = warnings;
@@ -338,11 +502,18 @@ impl Hotkeys {
                 None => "no shortcut could be registered".into(),
             });
         }
+        hotkeys.skipped = failures;
         Ok(hotkeys)
     }
 
     pub(crate) fn len(&self) -> usize {
         self.bindings.len()
+    }
+
+    /// Why each skipped shortcut was skipped, such as a `[shortcuts]` binding this keyboard
+    /// layout cannot type or a chord another app already owns.
+    pub(crate) fn skipped(&self) -> &[String] {
+        &self.skipped
     }
 
     /// The action and description of the hotkey Carbon delivered as `id`.
@@ -468,7 +639,7 @@ mod tests {
     #[test]
     fn registrations_carry_switch_move_layout_and_float_actions_including_zero_key() {
         let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
-        let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
+        let plan = HotkeyPlan::from_layout(&enabled, &Shortcuts::default(), &layout()).unwrap();
         let one = WorkspaceId::new(1).unwrap();
         let ten = WorkspaceId::new(10).unwrap();
         for (description, expected) in [
@@ -508,9 +679,53 @@ mod tests {
     }
 
     #[test]
+    fn scratchpad_shortcuts_register_only_while_the_lab_is_on() {
+        let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
+        let layout = LayoutSnapshot::for_test(vec![(42, '\\', false, false)], vec![]);
+        let scratchpad = |plan: &HotkeyPlan| {
+            plan.registrations
+                .iter()
+                .filter(|registration| matches!(registration.action, WorkerAction::Scratchpad(_)))
+                .map(|registration| {
+                    (
+                        registration.key_code,
+                        registration.modifiers,
+                        registration.action.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let off = HotkeyPlan::from_layout(&enabled, &Shortcuts::default(), &layout).unwrap();
+        assert!(scratchpad(&off).is_empty());
+
+        let shortcuts = Shortcuts {
+            scratchpad: true,
+            ..Shortcuts::default()
+        };
+        let on = HotkeyPlan::from_layout(&enabled, &shortcuts, &layout).unwrap();
+        assert_eq!(
+            scratchpad(&on),
+            vec![
+                (
+                    42,
+                    OPTION_KEY,
+                    WorkerAction::Scratchpad(ScratchpadCommand::Toggle)
+                ),
+                (
+                    42,
+                    OPTION_KEY | SHIFT_KEY,
+                    WorkerAction::Scratchpad(ScratchpadCommand::Mark)
+                ),
+            ]
+        );
+        assert_eq!(on.registrations.len(), off.registrations.len() + 2);
+    }
+
+    #[test]
     fn full_plan_contains_all_thirty_six_registrations() {
         let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
-        let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
+        let plan = HotkeyPlan::from_layout(&enabled, &Shortcuts::default(), &layout()).unwrap();
         assert_eq!(plan.registrations.len(), 36);
         assert!(plan.registrations.capacity() >= 36);
         let move_ws = plan
@@ -526,7 +741,7 @@ mod tests {
     #[test]
     fn float_shortcut_is_option_shift_space_and_collides_with_nothing() {
         let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
-        let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
+        let plan = HotkeyPlan::from_layout(&enabled, &Shortcuts::default(), &layout()).unwrap();
         let float = plan
             .registrations
             .iter()
@@ -556,7 +771,7 @@ mod tests {
     fn named_workspace_claims_its_letter_shortcuts() {
         let mut enabled = WorkspaceId::numbered().collect::<Vec<_>>();
         enabled.push(WorkspaceId::named('H').unwrap());
-        let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
+        let plan = HotkeyPlan::from_layout(&enabled, &Shortcuts::default(), &layout()).unwrap();
         let h = WorkspaceId::named('H').unwrap();
         assert_eq!(
             action(&plan, "switch workspace H"),
@@ -586,7 +801,7 @@ mod tests {
             ],
             vec![],
         );
-        let plan = HotkeyPlan::from_layout(&[], &layout).unwrap();
+        let plan = HotkeyPlan::from_layout(&[], &Shortcuts::default(), &layout).unwrap();
         let toggle_layout = plan
             .registrations
             .iter()
@@ -611,7 +826,7 @@ mod tests {
             ],
             vec![],
         );
-        let plan = HotkeyPlan::from_layout(&[], &layout).unwrap();
+        let plan = HotkeyPlan::from_layout(&[], &Shortcuts::default(), &layout).unwrap();
         assert_eq!(
             action(&plan, "focus left"),
             Some(&WorkerAction::Focus(Direction::Left))
@@ -648,7 +863,7 @@ mod tests {
             vec![],
         );
         let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
-        let plan = HotkeyPlan::from_layout(&enabled, &italian).unwrap();
+        let plan = HotkeyPlan::from_layout(&enabled, &Shortcuts::default(), &italian).unwrap();
         let registration = |description: &str| {
             plan.registrations
                 .iter()
@@ -702,7 +917,7 @@ mod tests {
             ],
             vec![],
         );
-        let plan = HotkeyPlan::from_layout(&[], &german).unwrap();
+        let plan = HotkeyPlan::from_layout(&[], &Shortcuts::default(), &german).unwrap();
         let cycle = plan
             .registrations
             .iter()
@@ -729,7 +944,12 @@ mod tests {
             vec![],
         );
 
-        let plan = HotkeyPlan::from_layout(&[], &non_latin_without_ascii_fallback).unwrap();
+        let plan = HotkeyPlan::from_layout(
+            &[],
+            &Shortcuts::default(),
+            &non_latin_without_ascii_fallback,
+        )
+        .unwrap();
         assert_eq!(action(&plan, "focus left"), None);
         assert_eq!(
             action(&plan, "toggle layout"),
@@ -751,5 +971,183 @@ mod tests {
             "{:?}",
             plan.warnings
         );
+    }
+
+    fn shortcuts(defaults: bool, bindings: &str) -> Shortcuts {
+        crate::config::Config::parse(&format!(
+            "version = 1\n[shortcuts]\ndefaults = {defaults}\n[shortcuts.bindings]\n{bindings}"
+        ))
+        .unwrap()
+        .shortcuts()
+        .clone()
+    }
+
+    fn registration<'a>(plan: &'a HotkeyPlan, action: &WorkerAction) -> Vec<&'a Registration> {
+        plan.registrations
+            .iter()
+            .filter(|registration| registration.action == *action)
+            .collect()
+    }
+
+    #[test]
+    fn configured_binding_replaces_the_built_in_shortcut_on_its_chord() {
+        let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
+        let shortcuts = shortcuts(true, r#""alt+j" = "layout""#);
+        let plan = HotkeyPlan::from_layout(&enabled, &shortcuts, &layout()).unwrap();
+        // Option+J now flips the split instead of focusing down, with no collision warning.
+        let toggles = registration(&plan, &WorkerAction::ToggleLayout);
+        assert!(toggles.iter().any(
+            |registration| registration.key_code == 61 && registration.modifiers == OPTION_KEY
+        ));
+        assert_eq!(action(&plan, "focus down"), None);
+        // The built-in Option+/ stays, and so does Option+Shift+J.
+        assert!(
+            toggles
+                .iter()
+                .any(|registration| registration.key_code == 65)
+        );
+        assert_eq!(
+            action(&plan, "move window down"),
+            Some(&WorkerAction::Reorder(Direction::Down))
+        );
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn arrow_keys_and_extra_modifiers_register_their_virtual_key_codes() {
+        let shortcuts = shortcuts(
+            true,
+            r#"
+            "alt+left" = "move-direction left"
+            "alt+shift+ctrl+right" = "focus right"
+            "alt+shift+b" = "balance"
+            "#,
+        );
+        let layout_with_b = LayoutSnapshot::for_test(vec![(11, 'b', false, false)], vec![]);
+        let plan = HotkeyPlan::from_layout(&[], &shortcuts, &layout_with_b).unwrap();
+        let reorder = registration(&plan, &WorkerAction::Reorder(Direction::Left));
+        assert!(
+            reorder
+                .iter()
+                .any(|registration| registration.key_code == 0x7b
+                    && registration.modifiers == OPTION_KEY)
+        );
+        let focus = registration(&plan, &WorkerAction::Focus(Direction::Right));
+        assert!(
+            focus
+                .iter()
+                .any(|registration| registration.key_code == 0x7c
+                    && registration.modifiers == OPTION_KEY | SHIFT_KEY | CONTROL_KEY)
+        );
+        assert_eq!(registration(&plan, &WorkerAction::Balance).len(), 1);
+    }
+
+    #[test]
+    fn none_unbinds_a_built_in_shortcut_without_registering_anything() {
+        let shortcuts = shortcuts(true, r#""alt+h" = "none""#);
+        let plan = HotkeyPlan::from_layout(&[], &shortcuts, &layout()).unwrap();
+        assert_eq!(action(&plan, "focus left"), None);
+        assert!(!plan.registrations.iter().any(
+            |registration| registration.key_code == 60 && registration.modifiers == OPTION_KEY
+        ));
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn defaults_false_registers_only_the_configured_bindings() {
+        let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
+        let shortcuts = shortcuts(
+            false,
+            r#"
+            "alt+1" = "switch 1"
+            "alt+shift+1" = "move 1"
+            "alt+v" = "float"
+            "#,
+        );
+        let with_v = LayoutSnapshot::for_test(vec![(69, 'v', false, false)], vec![]);
+        let plan = HotkeyPlan::from_layout(&enabled, &shortcuts, &with_v).unwrap();
+        assert_eq!(plan.registrations.len(), 3);
+        assert_eq!(
+            action(&plan, "switch workspace 1"),
+            Some(&WorkerAction::SwitchWorkspace(WorkspaceId::new(1).unwrap()))
+        );
+        assert_eq!(
+            registration(&plan, &WorkerAction::ToggleFloat)[0].key_code,
+            69
+        );
+    }
+
+    #[test]
+    fn binding_a_workspace_that_is_not_enabled_is_skipped_with_a_warning() {
+        let shortcuts = shortcuts(true, r#""alt+s" = "switch S""#);
+        let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
+        let layout = LayoutSnapshot::for_test(vec![(1, 's', false, false)], vec![]);
+        let plan = HotkeyPlan::from_layout(&enabled, &shortcuts, &layout).unwrap();
+        assert_eq!(action(&plan, "switch workspace S"), None);
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("alt+s") && warning.contains("workspace S")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn modifier_moves_every_built_in_shortcut_and_keeps_shift_for_move() {
+        let shortcuts = crate::config::Config::parse(
+            "version = 1\n[shortcuts]\nmodifier = \"ctrl+alt\"\n[shortcuts.bindings]\n\"alt+h\" = \"layout\"",
+        )
+        .unwrap()
+        .shortcuts()
+        .clone();
+        let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
+        let plan = HotkeyPlan::from_layout(&enabled, &shortcuts, &layout()).unwrap();
+        let base = CONTROL_KEY | OPTION_KEY;
+        for (description, modifiers) in [
+            ("focus left", base),
+            ("move window left", base | SHIFT_KEY),
+            ("switch workspace 3", base),
+            ("move window to workspace 3", base | SHIFT_KEY),
+            ("toggle floating window", base | SHIFT_KEY),
+            ("cycle workspace windows", base),
+        ] {
+            let found = plan
+                .registrations
+                .iter()
+                .find(|registration| registration.description == description)
+                .unwrap_or_else(|| panic!("missing {description}"));
+            assert_eq!(found.modifiers, modifiers, "{description}");
+        }
+        // A binding is an exact chord: plain Option+H flips the split beside Ctrl+Option+H.
+        assert!(
+            registration(&plan, &WorkerAction::ToggleLayout)
+                .iter()
+                .any(|registration| registration.key_code == 60
+                    && registration.modifiers == OPTION_KEY)
+        );
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn keeping_fixed_scratchpad_unbind_under_new_base_modifier_keeps_toggle_disabled() {
+        let layout = LayoutSnapshot::for_test(vec![(42, '\\', false, false)], vec![]);
+        let config = crate::config::Config::parse(
+            "version = 1\n[labs]\nscratchpad = true\n[shortcuts]\nmodifier = 'ctrl+alt'\n[shortcuts.bindings]\n'alt+\\' = 'none'\n",
+        )
+        .unwrap();
+        let enabled = [WorkspaceId::new(1).unwrap()];
+        let plan = HotkeyPlan::from_layout(&enabled, config.shortcuts(), &layout).unwrap();
+        assert_eq!(action(&plan, "show or hide the scratchpad"), None);
+        assert_eq!(
+            action(&plan, "move window to or from the scratchpad"),
+            Some(&WorkerAction::Scratchpad(ScratchpadCommand::Mark))
+        );
+        let switch_1 = plan
+            .registrations
+            .iter()
+            .find(|registration| registration.description == "switch workspace 1")
+            .unwrap();
+        assert_eq!(switch_1.modifiers, CONTROL_KEY | OPTION_KEY);
     }
 }

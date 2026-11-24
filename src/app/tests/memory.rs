@@ -567,3 +567,42 @@ fn moving_a_recalled_window_journals_a_wrong_recall_without_marking_the_app() {
     );
     assert!(!runtime.memory.memory.returns(BUNDLE));
 }
+
+/// #122: a window that claims a floating placement floats again on its
+/// remembered workspace, keeps its frame across cycles, and tiles on toggle.
+#[test]
+fn a_recalled_floating_placement_keeps_the_window_floating() {
+    let window = relaunched(10);
+    let original = frame(50);
+    let mut remembered = WindowMemory::default();
+    assert!(remembered.record(
+        BUNDLE,
+        vec![RememberedWindow {
+            workspace: WorkspaceId::ONE,
+            frame: original,
+            floating: true,
+        }],
+        1,
+    ));
+    let mut runtime = runtime(backend_with(&[(window.clone(), original)]));
+    runtime.restore_window_memory(remembered);
+    let cancelled = AtomicBool::new(false);
+
+    for _ in 0..2 {
+        runtime.cycle(outputs(), &cancelled).unwrap();
+        assert_eq!(recalls(&runtime), vec![(10, WorkspaceId::ONE)]);
+        assert_eq!(runtime.workspaces.workspace_of(&window), None);
+        assert_eq!(
+            runtime.workspaces.floating_workspace_of(&window),
+            Some(WorkspaceId::ONE)
+        );
+        assert_eq!(runtime.backend.frames[&window], original);
+    }
+
+    runtime.backend.focused = Some(window.clone());
+    runtime.toggle_float(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&window),
+        Some(WorkspaceId::ONE)
+    );
+}

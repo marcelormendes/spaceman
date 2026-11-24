@@ -16,9 +16,9 @@ Spaceman is an experimental public preview, not a broadly qualified release.
   order and may swap workspaces.
 - Configuration supports ordered exact-match `float`/`route`/`ignore` rules and display assignment. It
   intentionally does not support orthogonal named app spaces or regex title matching.
-- Configuration changes to rules, display assignments, newly referenced named workspace shortcuts,
-  and `[settings]` apply automatically without restarting. `ctl restart` exits safely but does not
-  relaunch.
+- Configuration changes to rules, `[shortcuts]`, `[labs]`, display assignments, newly referenced
+  named workspace shortcuts, and `[settings]` apply automatically without restarting. `ctl restart`
+  exits safely but does not relaunch.
 - Spaceman assumes one macOS Space per display. Windows on another Space are adopted into the active
   workspace when that Space is shown, and tiles whose windows are ordered out while it is shown may
   be released.

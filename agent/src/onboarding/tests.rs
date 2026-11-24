@@ -4,6 +4,7 @@ use super::flow::{
     Effect, Flow, Input, SetupState, Step, completion_recorded_at, launch_step_at,
     record_completion_at, record_step_at, saved_step_at,
 };
+use super::sandbox::{Key, Lesson, Sandbox, Split};
 use crate::{apps::window_manager_name, controls::PermissionControl};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -178,4 +179,101 @@ fn recognizes_conflicting_window_managers_by_bundle_or_daemon_name() {
         window_manager_name(Some("com.apple.Safari"), Some("Safari")),
         None
     );
+}
+
+#[test]
+fn practice_keys_map_from_ansi_key_codes() {
+    assert_eq!(Key::from_key_code(4), Some(Key::Left));
+    assert_eq!(Key::from_key_code(38), Some(Key::Down));
+    assert_eq!(Key::from_key_code(40), Some(Key::Up));
+    assert_eq!(Key::from_key_code(37), Some(Key::Right));
+    assert_eq!(Key::from_key_code(44), Some(Key::Flip));
+    assert_eq!(Key::from_key_code(18), Some(Key::Workspace(1)));
+    assert_eq!(Key::from_key_code(19), Some(Key::Workspace(2)));
+    assert_eq!(Key::from_key_code(20), None);
+}
+
+#[test]
+fn moving_focus_counts_only_when_a_tile_lies_that_way() {
+    let mut sandbox = Sandbox::default();
+    assert_eq!(sandbox.current(), Some(Lesson::Focus));
+    // Side by side: nothing is below or to the left of the first tile.
+    sandbox.press(Key::Down);
+    sandbox.press(Key::Left);
+    assert!(!sandbox.done(Lesson::Focus));
+    assert_eq!(sandbox.focus(1), 0);
+    assert_eq!(sandbox.presses, 2);
+
+    sandbox.press(Key::Right);
+    assert_eq!(sandbox.focus(1), 1);
+    assert!(sandbox.done(Lesson::Focus));
+    assert_eq!(sandbox.current(), Some(Lesson::Flip));
+    sandbox.press(Key::Left);
+    assert_eq!(sandbox.focus(1), 0);
+}
+
+#[test]
+fn flipping_stacks_the_split_and_swaps_the_focus_keys() {
+    let mut sandbox = Sandbox::default();
+    assert_eq!(sandbox.focus_keys(), [Key::Left, Key::Right]);
+    sandbox.press(Key::Flip);
+    assert_eq!(sandbox.split(1), Split::Stacked);
+    assert!(sandbox.done(Lesson::Flip));
+    assert_eq!(
+        sandbox.frames(1),
+        vec![[0.0, 0.0, 1.0, 0.5], [0.0, 0.5, 1.0, 0.5]]
+    );
+    assert_eq!(sandbox.focus_keys(), [Key::Up, Key::Down]);
+    sandbox.press(Key::Down);
+    assert_eq!(sandbox.focus(1), 1);
+    sandbox.press(Key::Flip);
+    assert_eq!(sandbox.split(1), Split::Side);
+    // Focus stays on the same window through a flip.
+    assert_eq!(sandbox.focus(1), 1);
+}
+
+#[test]
+fn switching_counts_once_there_and_back_and_each_desk_keeps_its_own_layout() {
+    let mut sandbox = Sandbox::default();
+    sandbox.press(Key::Workspace(1));
+    assert_eq!(sandbox.switches, 0);
+
+    sandbox.press(Key::Workspace(2));
+    assert_eq!(sandbox.workspace, 2);
+    assert_eq!(sandbox.switches, 1);
+    assert!(!sandbox.done(Lesson::Switch));
+    // Workspace 2 holds three windows: one on the left, two stacked on the right.
+    assert_eq!(sandbox.frames(2).len(), 3);
+    sandbox.press(Key::Right);
+    assert_eq!(sandbox.focus(2), 1);
+    sandbox.press(Key::Down);
+    assert_eq!(sandbox.focus(2), 2);
+    sandbox.press(Key::Left);
+    assert_eq!(sandbox.focus(2), 0);
+    sandbox.press(Key::Flip);
+    assert_eq!(sandbox.split(2), Split::Stacked);
+    assert_eq!(sandbox.split(1), Split::Side);
+
+    sandbox.press(Key::Workspace(1));
+    assert_eq!(sandbox.workspace, 1);
+    assert!(sandbox.done(Lesson::Switch));
+    assert!(sandbox.complete());
+    assert_eq!(sandbox.current(), None);
+}
+
+#[test]
+fn practice_presses_play_only_on_the_done_step() {
+    let mut ui = crate::playground::blank_fixture();
+    assert!(!super::press(&mut ui, Key::Right));
+
+    super::tour_scene(&mut ui, Step::Welcome, true, false);
+    assert!(!super::press(&mut ui, Key::Right));
+    assert_eq!(ui.tour.as_ref().map(|tour| tour.sandbox.presses), Some(0));
+
+    super::tour_scene(&mut ui, Step::Done, true, false);
+    assert!(super::press(&mut ui, Key::Right));
+    let tour = ui.tour.as_ref().unwrap();
+    assert_eq!(tour.sandbox.focus(1), 1);
+    // Practising never ends the tour; Done stays the only way out.
+    assert_eq!(tour.flow.step(), Step::Done);
 }

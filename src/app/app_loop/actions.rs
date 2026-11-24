@@ -17,11 +17,14 @@ impl MainThreadAgent {
         }
         self.awaiting_accessibility = false;
         if self.hotkeys.is_none() {
-            match HotkeyPlan::current(&self.hotkey_workspaces)
+            match HotkeyPlan::current(&self.hotkey_workspaces, &self.shortcuts)
                 .and_then(|plan| Hotkeys::install(self.actions_sender.clone(), plan))
             {
                 Ok(registered) => {
                     log_event!("hotkeys: registered {} shortcuts", registered.len());
+                    for skipped in registered.skipped() {
+                        log_event!("hotkeys: {skipped}");
+                    }
                     self.hotkeys = Some(registered);
                     self.hotkey_delivery.clear();
                 }
@@ -37,12 +40,12 @@ impl MainThreadAgent {
         }
         self.listen_for_input();
         self.automatic = true;
-        self.last_error = None;
         self.cancelled.store(false, Ordering::Release);
         self.events.invalidate();
         self.ui_dirty = true;
         status_item::set_automatic(true);
-        status_item::set_status(self.scope.automatic_status());
+        let status = automatic_started_status(&mut self.last_error, self.scope.automatic_status());
+        status_item::set_status(status);
     }
 
     pub(super) fn drain_actions(&mut self) {
@@ -136,6 +139,7 @@ impl MainThreadAgent {
                     self.ui_dirty = true;
                 }
                 Action::CheckForUpdates => {
+                    self.clear_update_failed_error();
                     self.updater.check_now();
                     self.ui_dirty = true;
                 }
@@ -143,14 +147,16 @@ impl MainThreadAgent {
                     status_item::set_status("No update is ready to install");
                 }
                 Action::ConfirmUpdateSwitch => {
+                    self.clear_update_failed_error();
                     self.updater.confirm_switch();
                     self.ui_dirty = true;
                 }
-                Action::DownloadUpdate => {
-                    if let Err(error) = self.updater.open_download() {
+                Action::DownloadUpdate => match self.updater.open_download() {
+                    Ok(()) => self.clear_update_failed_error(),
+                    Err(error) => {
                         status_item::set_status(&format!("Could not open the update: {error}"));
                     }
-                }
+                },
                 Action::ToggleLaunchAtLogin => {
                     let result = login_item::toggle();
                     self.launch_at_login = UiLaunchAtLogin::from_result(result.clone());
@@ -198,7 +204,14 @@ impl MainThreadAgent {
                     self.option_key_down(key_code, modifiers);
                 }
                 Action::Worker(action) => {
-                    if self.automatic {
+                    if self.automatic
+                        && !(matches!(action, WorkerAction::Swipe(..))
+                            && crate::app::input::should_ignore_swipe(
+                                macos::mouse_down(),
+                                self.mouse_was_down,
+                                self.gesture_tracker.window().is_some(),
+                            ))
+                    {
                         self.queue_worker_input(QueuedInput::Action(action));
                     }
                 }

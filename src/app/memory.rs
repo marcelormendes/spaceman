@@ -159,6 +159,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 workspace: placement.workspace,
                 floating: placement.floating,
             });
+            // A floated window floats again, like one restored on an agent
+            // restart, until the user toggles it back into the tiles.
+            if placement.floating {
+                self.manual_floating.insert(window.clone());
+            }
             recall.claimed.insert(window, placement);
             claimed_indices.push(index);
         }

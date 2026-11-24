@@ -6,7 +6,7 @@ use rune::{
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, glyphs};
 use spaceman::app::UiLaunchAtLogin;
 
-use super::{Input, Step, flow::View, input};
+use super::{Input, Step, desk, flow::View, input, sandbox::Sandbox};
 use crate::{
     Ui,
     controls::{self, ButtonKind, DESCRIPTION, Paint},
@@ -44,11 +44,12 @@ pub fn overlay(ui: &Ui, p: Paint) -> Option<El> {
     let step_body = match view.step {
         Step::Welcome => welcome(p, &tour.conflicts),
         Step::Setup => setup(ui, p, &view),
-        Step::Done => done(p, !view.manual && !tiling),
+        Step::Done => done(p, &tour.sandbox),
     };
+    let width = step_width(view.step);
     let page = col()
         .key(format!("step-{}", view.step.key()))
-        .w(WIDTH)
+        .w(width)
         .transition(step_transition(view.direction))
         .child(step_body);
     let top = row()
@@ -84,7 +85,7 @@ pub fn overlay(ui: &Ui, p: Paint) -> Option<El> {
                 col().key("tour-page").grow(1.0).shrink().center().child(
                     col()
                         .key("tour-column")
-                        .w(WIDTH)
+                        .w(width)
                         .motion(STEP_ENTER)
                         .child(page),
                 ),
@@ -95,9 +96,18 @@ pub fn overlay(ui: &Ui, p: Paint) -> Option<El> {
                     .pt(12.0)
                     .pb(28.0)
                     .center()
-                    .child(footer(p, &view, tiling)),
+                    .child(footer(p, &view, tiling, width)),
             ),
     )
+}
+
+/// The Done step widens to hold the practice desktop beside its lessons.
+fn step_width(step: Step) -> f32 {
+    if step == Step::Done {
+        desk::WIDTH
+    } else {
+        WIDTH
+    }
 }
 
 fn step_transition(direction: i8) -> Transition {
@@ -110,7 +120,7 @@ fn step_transition(direction: i8) -> Transition {
     Transition::asymmetric(enter, exit).springs(SpringPair::new(STEP_ENTER, STEP_EXIT))
 }
 
-fn footer(p: Paint, view: &View, tiling: bool) -> El {
+fn footer(p: Paint, view: &View, tiling: bool, width: f32) -> El {
     let (label, enabled, forward) = match view.step {
         Step::Welcome => ("Get started", true, true),
         Step::Setup => ("Continue", view.ready, true),
@@ -152,7 +162,8 @@ fn footer(p: Paint, view: &View, tiling: bool) -> El {
     });
     row()
         .key("tour-footer")
-        .w(WIDTH)
+        .w(width)
+        .motion(STEP_ENTER)
         .h(32.0)
         .center_y()
         .child(row().key("start").w(FOOTER_SLOT).children(back))
@@ -390,60 +401,14 @@ fn setup(ui: &Ui, p: Paint, view: &View) -> El {
         .child(controls::card(p, "setup-card", vec![access_row, login_row]))
 }
 
-const DONE_SHORTCUTS: &[(&str, &[&[&str]])] = &[
-    ("Switch workspace", &[&["⌥", "1…9, 0"]]),
-    ("Move window to workspace", &[&["⌥", "⇧", "1…9, 0"]]),
-    (
-        "Focus or move a tile",
-        &[&["⌥", "H J K L"], &["⌥", "⇧", "H J K L"]],
-    ),
-    ("Flip split or fullscreen", &[&["⌥", "/"], &["⌥", "⇧", "F"]]),
-];
-
-fn done(p: Paint, starting: bool) -> El {
-    let c = &p.k.c;
-    let art = row().key("done-art").w_full().h(96.0).center().child(
-        row()
-            .key("ring")
-            .padding(12.0)
-            .radius(44.0)
-            .border(p.hair, c.border_base.alpha(0.35))
-            .child(
-                row()
-                    .key("badge")
-                    .size(64.0, 64.0)
-                    .radius(32.0)
-                    .center()
-                    .fill(c.success.bg)
-                    .child(
-                        icon(p.k.glyph.check_small, 36.0)
-                            .key("check")
-                            .color(p.success()),
-                    ),
-            ),
-    );
-    let body = if starting {
-        "Your windows tile as soon as you start. Spaceman stays in the menu bar."
-    } else {
-        "Spaceman stays in the menu bar, ready for your shortcuts."
-    };
-    let rows = controls::shortcut_rows(p, "done-shortcut", DONE_SHORTCUTS);
-    let footnote = text("0 = workspace 10 · Two displays: 1–5 main, 6–10 secondary")
-        .key("done-footnote")
-        .font(DESCRIPTION)
-        .color(p.faint())
-        .align(rune::Align::Center)
-        .w_full();
+fn done(p: Paint, sandbox: &Sandbox) -> El {
     col()
         .key("done")
-        .gap(18.0)
-        .child(art)
-        .child(title_block(p, "You're all set", Some(body)))
-        .child(
-            col()
-                .key("done-shortcuts-group")
-                .gap(10.0)
-                .child(controls::card(p, "done-shortcuts", rows))
-                .child(footnote),
-        )
+        .gap(28.0)
+        .child(title_block(
+            p,
+            "You're all set",
+            Some("Try the shortcuts here. Spaceman lives in the menu bar."),
+        ))
+        .child(desk::practice(p, sandbox))
 }

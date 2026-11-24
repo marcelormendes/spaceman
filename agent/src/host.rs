@@ -4,7 +4,10 @@
 
 #![allow(unsafe_code)]
 
-use std::{cell::RefCell, ptr::NonNull};
+use std::{
+    cell::{Cell, RefCell},
+    ptr::NonNull,
+};
 
 use block2::RcBlock;
 use objc2::{
@@ -33,6 +36,23 @@ thread_local! {
     static LAUNCH: RefCell<Option<Launch>> = const { RefCell::new(None) };
     static PUMP: RefCell<Option<PumpState>> = const { RefCell::new(None) };
     static STARTUP_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Settings › Shortcuts is recording a chord; the next tick holds the hotkeys off.
+    static RECORDING_SHORTCUT: Cell<bool> = const { Cell::new(false) };
+    /// A `[shortcuts]` table Settings just saved, for the next tick to register.
+    static SAVED_SHORTCUTS: RefCell<Option<spaceman::shortcuts::Shortcuts>> =
+        const { RefCell::new(None) };
+}
+
+/// Holds the global hotkeys off while Settings › Shortcuts records a chord, so pressing one
+/// reaches the recorder instead of moving windows. The agent takes it on its next tick, outside
+/// any Rune callback.
+pub fn set_shortcut_recording(recording: bool) {
+    RECORDING_SHORTCUT.with(|slot| slot.set(recording));
+}
+
+/// Registers a `[shortcuts]` table Settings saved, without waiting for the config probe.
+pub fn shortcuts_saved(shortcuts: spaceman::shortcuts::Shortcuts) {
+    SAVED_SHORTCUTS.with(|slot| *slot.borrow_mut() = Some(shortcuts));
 }
 
 pub fn bring_window_forward(window: &rune::AppHandle<Ui>) {
@@ -193,7 +213,19 @@ fn start_main_thread() {
 }
 
 fn tick_pump() {
-    let outcome = PUMP.with(|slot| slot.borrow_mut().as_mut().map(|state| state.agent.tick()));
+    let recording = RECORDING_SHORTCUT.with(Cell::get);
+    let saved = SAVED_SHORTCUTS.with(|slot| slot.borrow_mut().take());
+    let outcome = PUMP.with(|slot| {
+        slot.borrow_mut().as_mut().map(|state| {
+            // A table saved by the recorder registers before the recording's hold ends, so
+            // the hotkeys come back once, with the new chord.
+            if let Some(shortcuts) = saved {
+                state.agent.apply_shortcuts(shortcuts);
+            }
+            state.agent.set_shortcut_recording(recording);
+            state.agent.tick()
+        })
+    });
     match outcome {
         Some(TickOutcome::Continue) | None => {}
         Some(TickOutcome::Quit) => {

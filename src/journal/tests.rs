@@ -247,7 +247,211 @@ fn summary_reconstructs_the_arrangement_and_counts_anomalies() {
     assert!(summary.contains("  1: App"), "{summary}");
     assert!(summary.contains("  3: App"), "{summary}");
     assert_eq!(
-        summarize(&lines, base + 100_000, base + 200_000, 0),
+        summarize(&[], base + 100_000, base + 200_000, 0),
         "No journal events in this period."
     );
+    let quiet = summarize(&lines, base + 100_000, base + 200_000, 0);
+    assert!(
+        quiet.starts_with("No journal events in this period."),
+        "{quiet}"
+    );
+    assert!(
+        quiet.contains("Last known arrangement: active 1"),
+        "{quiet}"
+    );
+    assert!(quiet.contains("  1: App"), "{quiet}");
+    assert!(quiet.contains("  3: App"), "{quiet}");
+}
+
+#[test]
+fn lookback_with_no_events_keeps_last_known_arrangement() {
+    let minute = 60_000;
+    let now = 10_000_000;
+    let display = Rect {
+        x: 0,
+        y: 0,
+        width: 1200,
+        height: 800,
+    };
+    let lines = vec![JournalLine {
+        t: now - 90 * minute,
+        event: JournalEvent::Snapshot {
+            arrangement: Arrangement {
+                displays: vec![display],
+                active: vec![WorkspaceId::new(2).unwrap()],
+                windows: vec![],
+            },
+        },
+    }];
+
+    let one_hour = summarize(&lines, now - 60 * minute, now, 0);
+    assert!(
+        one_hour.starts_with("No journal events in this period."),
+        "{one_hour}"
+    );
+    assert!(
+        one_hour.contains("Last known arrangement: active 2"),
+        "{one_hour}"
+    );
+
+    let two_hours = summarize(&lines, now - 120 * minute, now, 0);
+    assert!(
+        two_hours.starts_with("1 events from 1h 30m ago to 1h 30m ago"),
+        "{two_hours}"
+    );
+    assert!(
+        two_hours.contains("Last known arrangement: active 2"),
+        "{two_hours}"
+    );
+}
+
+#[test]
+fn anomaly_durations_are_independent_of_other_windows_event_order() {
+    let minute = 60_000;
+    let now = 10_000_000;
+    let since = now - 60 * minute;
+    let event = |window, offset_ms, state, duration_ms| JournalLine {
+        t: now - offset_ms,
+        event: JournalEvent::Anomaly {
+            state,
+            anomaly: anomaly(AnomalyKind::Misplaced, window),
+            duration_ms,
+        },
+    };
+    let build = |begin_b_offset_ms: u64| {
+        let mut rows = vec![
+            event(1, 62 * minute, AnomalyState::Begin, None),
+            event(1, 59 * minute, AnomalyState::End, Some(183_000)),
+            event(2, begin_b_offset_ms, AnomalyState::Begin, None),
+            event(
+                2,
+                begin_b_offset_ms - minute,
+                AnomalyState::End,
+                Some(63_000),
+            ),
+        ];
+        rows.sort_by_key(|line| line.t);
+        rows
+    };
+
+    // Window 2 begins either before (59.5m ago) or after (58m ago) window 1's end (59m ago).
+    let early = build(59 * minute + 30_000);
+    let late = build(58 * minute);
+
+    let early_summary = Summary::new(&early, since, now);
+    let late_summary = Summary::new(&late, since, now);
+    let early_kind = &early_summary.anomalies[&AnomalyKind::Misplaced];
+    let late_kind = &late_summary.anomalies[&AnomalyKind::Misplaced];
+    assert_eq!(early_kind.count, 1);
+    assert_eq!(late_kind.count, 1);
+    assert_eq!(early_kind.total_ms, 63_000);
+    assert_eq!(late_kind.total_ms, 63_000);
+    assert_eq!(early_kind.longest_ms, 63_000);
+    assert_eq!(late_kind.longest_ms, 63_000);
+
+    let early_report = summarize(&early, since, now, 0);
+    let late_report = summarize(&late, since, now, 0);
+    assert!(
+        early_report.contains("misplaced         1x  total      1m  longest      1m"),
+        "{early_report}"
+    );
+    assert!(
+        late_report.contains("misplaced         1x  total      1m  longest      1m"),
+        "{late_report}"
+    );
+
+    // All-time report includes both completed episodes.
+    let all_time = Summary::new(&early, 0, now);
+    let all_kind = &all_time.anomalies[&AnomalyKind::Misplaced];
+    assert_eq!(all_kind.count, 2);
+    assert_eq!(all_kind.total_ms, 246_000);
+    assert_eq!(all_kind.longest_ms, 183_000);
+}
+
+#[test]
+fn lookback_reconstructs_arrangement_from_snapshot_before_cutoff() {
+    let minute = 60_000;
+    let now = 10_000_000;
+    let since = now - 60 * minute;
+    let display = Rect {
+        x: 0,
+        y: 0,
+        width: 1200,
+        height: 800,
+    };
+    let initial = Arrangement {
+        displays: vec![display],
+        active: vec![WorkspaceId::ONE],
+        windows: vec![window(1, Some(1), 0)],
+    };
+    let before_cutoff = Arrangement {
+        displays: vec![display],
+        active: vec![WorkspaceId::ONE],
+        windows: vec![window(1, Some(1), 0), window(2, Some(3), 0)],
+    };
+    let after_cutoff = Arrangement {
+        displays: vec![display],
+        active: vec![WorkspaceId::new(2).unwrap()],
+        windows: vec![window(1, Some(1), 0), window(2, Some(3), 0)],
+    };
+    let lines = vec![
+        JournalLine {
+            t: now - 75 * minute,
+            event: JournalEvent::Snapshot {
+                arrangement: initial.clone(),
+            },
+        },
+        JournalLine {
+            t: now - 70 * minute,
+            event: diff(&initial, &before_cutoff).unwrap(),
+        },
+        JournalLine {
+            t: now - 50 * minute,
+            event: diff(&before_cutoff, &after_cutoff).unwrap(),
+        },
+    ];
+
+    let lookback = summarize(&lines, since, now, 0);
+    assert!(
+        lookback.starts_with("1 events from 50m ago to 50m ago"),
+        "{lookback}"
+    );
+    assert!(
+        lookback.contains("Last known arrangement: active 2"),
+        "{lookback}"
+    );
+    assert!(lookback.contains("  1: App"), "{lookback}");
+    assert!(lookback.contains("  3: App"), "{lookback}");
+
+    let all_time = summarize(&lines, 0, now, 0);
+    assert!(
+        all_time.starts_with("3 events from 1h 15m ago to 50m ago"),
+        "{all_time}"
+    );
+    assert!(
+        all_time.contains("Last known arrangement: active 2"),
+        "{all_time}"
+    );
+}
+
+#[test]
+fn every_anomaly_kind_has_prose_meaning_distinct_from_its_label() {
+    for kind in [
+        AnomalyKind::Leaked,
+        AnomalyKind::Stranded,
+        AnomalyKind::ParkedVisible,
+        AnomalyKind::Unadopted,
+        AnomalyKind::ConstrainedOverlap,
+        AnomalyKind::Misplaced,
+        AnomalyKind::Missing,
+        AnomalyKind::ParkingExempt,
+    ] {
+        assert_ne!(
+            kind.meaning(),
+            kind.label(),
+            "anomaly {:?} meaning should explain the condition rather than repeating its label",
+            kind
+        );
+        assert!(kind.meaning().contains(' '), "expected prose for {kind:?}");
+    }
 }

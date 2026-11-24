@@ -28,9 +28,18 @@ pub struct DisplayOutput {
     pub is_main: bool,
 }
 
+/// Maximum distance outside a display's visible tiling frame (in points) that a
+/// synthetic `DisplayOutputs::new` still attributes to that display's reserved
+/// menu-bar or Dock strip when full physical screen bounds were not provided.
+const SYNTHETIC_STRIP_MARGIN: i64 = 256;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisplayOutputs {
     displays: Vec<DisplayOutput>,
+    /// Full physical screen bounds (including menu bar, notch, and Dock), parallel
+    /// to `displays`, when discovered from macOS `NSScreen` or supplied via
+    /// `with_bounds`. `None` when constructed from usable frames alone.
+    bounds: Option<Vec<Rect>>,
     main_index: usize,
 }
 
@@ -41,8 +50,20 @@ impl DisplayOutputs {
         };
         Ok(Self {
             displays,
+            bounds: None,
             main_index,
         })
+    }
+
+    pub fn with_bounds(
+        displays: Vec<DisplayOutput>,
+        bounds: Vec<Rect>,
+    ) -> Result<Self, SnapshotError> {
+        let mut outputs = Self::new(displays)?;
+        if bounds.len() == outputs.displays.len() {
+            outputs.bounds = Some(bounds);
+        }
+        Ok(outputs)
     }
 
     #[must_use]
@@ -115,6 +136,70 @@ impl DisplayOutputs {
     pub fn union(&self) -> Rect {
         self.frames().fold(self.main().frame, union_rect)
     }
+
+    /// Physical display containing `point`, including its menu-bar and Dock strips.
+    ///
+    /// Uses full `NSScreen::frame()` bounds when available (with a 1-point tolerance
+    /// for rounded screen-edge pointer coordinates). When only usable frames were
+    /// provided (synthetic fixtures), falls back to the nearest display whose frame
+    /// lies within a reserved-strip margin.
+    #[must_use]
+    pub fn display_at(&self, point: (i32, i32)) -> Option<&DisplayOutput> {
+        let (x, y) = point;
+        if let Some(bounds) = &self.bounds {
+            if let Some(index) = bounds.iter().position(|rect| rect.contains(x, y)) {
+                return Some(&self.displays[index]);
+            }
+            return self.nearest_within(bounds, x, y, 1);
+        }
+        if let Some(display) = self.displays.iter().find(|d| d.frame.contains(x, y)) {
+            return Some(display);
+        }
+        let frames: Vec<Rect> = self.displays.iter().map(|d| d.frame).collect();
+        self.nearest_within(&frames, x, y, SYNTHETIC_STRIP_MARGIN)
+    }
+
+    /// Physical display for `point`, matching menu-bar and Dock strips and falling
+    /// back to the nearest display rather than jumping straight to main.
+    #[must_use]
+    pub fn display_for_point(&self, point: (i32, i32)) -> &DisplayOutput {
+        if let Some(display) = self.display_at(point) {
+            return display;
+        }
+        let (x, y) = point;
+        let rects = self.bounds.as_deref();
+        self.displays
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, display)| {
+                let rect = rects.map_or(display.frame, |bounds| bounds[*index]);
+                let (dx, dy) = rect_axis_distance(rect, x, y);
+                (dx * dx + dy * dy, !display.is_main)
+            })
+            .map_or_else(|| self.main(), |(_, display)| display)
+    }
+
+    fn nearest_within(
+        &self,
+        rects: &[Rect],
+        x: i32,
+        y: i32,
+        max_margin: i64,
+    ) -> Option<&DisplayOutput> {
+        self.displays
+            .iter()
+            .enumerate()
+            .filter_map(|(index, display)| {
+                let (dx, dy) = rect_axis_distance(rects[index], x, y);
+                (dx <= max_margin && dy <= max_margin).then_some((
+                    dx * dx + dy * dy,
+                    !display.is_main,
+                    display,
+                ))
+            })
+            .min_by_key(|(distance, not_main, _)| (*distance, *not_main))
+            .map(|(_, _, display)| display)
+    }
 }
 
 pub fn outputs() -> Result<DisplayOutputs, SnapshotError> {
@@ -127,6 +212,7 @@ pub fn outputs() -> Result<DisplayOutputs, SnapshotError> {
             .map(|frame| frame.size.height)
             .ok_or(SnapshotError::MainScreenUnavailable)?;
         let mut displays = Vec::with_capacity(screens.count());
+        let mut bounds = Vec::with_capacity(screens.count());
         for index in 0..screens.count() {
             let screen = screens.objectAtIndex(index);
             let frame = screen.frame();
@@ -138,8 +224,9 @@ pub fn outputs() -> Result<DisplayOutputs, SnapshotError> {
                 frame: screen_output(&screen, primary_height),
                 is_main: frame.origin.x == 0.0 && frame.origin.y == 0.0,
             });
+            bounds.push(screen_rect(frame, primary_height));
         }
-        DisplayOutputs::new(displays)
+        DisplayOutputs::with_bounds(displays, bounds)
     })
 }
 
@@ -179,13 +266,40 @@ fn display_uuid(display_id: u32) -> Option<String> {
 }
 
 fn screen_output(screen: &NSScreen, primary_height: f64) -> Rect {
-    let visible = screen.visibleFrame();
+    screen_rect(screen.visibleFrame(), primary_height)
+}
+
+fn screen_rect(rect: objc2_foundation::NSRect, primary_height: f64) -> Rect {
     Rect {
-        x: visible.origin.x.round() as i32,
-        y: (primary_height - visible.origin.y - visible.size.height).round() as i32,
-        width: visible.size.width.round() as i32,
-        height: visible.size.height.round() as i32,
+        x: rect.origin.x.round() as i32,
+        y: (primary_height - rect.origin.y - rect.size.height).round() as i32,
+        width: rect.size.width.round() as i32,
+        height: rect.size.height.round() as i32,
     }
+}
+
+/// Non-negative distance along each axis from `(x, y)` to the closed pixel
+/// region covered by `rect`.
+fn rect_axis_distance(rect: Rect, x: i32, y: i32) -> (i64, i64) {
+    let min_x = i64::from(rect.x);
+    let max_x = min_x + i64::from(rect.width).saturating_sub(1).max(0);
+    let min_y = i64::from(rect.y);
+    let max_y = min_y + i64::from(rect.height).saturating_sub(1).max(0);
+    let dx = if i64::from(x) < min_x {
+        min_x - i64::from(x)
+    } else if i64::from(x) > max_x {
+        i64::from(x) - max_x
+    } else {
+        0
+    };
+    let dy = if i64::from(y) < min_y {
+        min_y - i64::from(y)
+    } else if i64::from(y) > max_y {
+        i64::from(y) - max_y
+    } else {
+        0
+    };
+    (dx, dy)
 }
 
 fn union_rect(left: Rect, right: Rect) -> Rect {
@@ -246,5 +360,106 @@ mod tests {
             .map(|display| display.id.as_str())
             .collect();
         assert_eq!(ids, ["studio-b", "built-in", "studio-a"]);
+    }
+
+    #[test]
+    fn display_at_matches_reserved_strips_with_bounds_and_synthetic_frames() {
+        let visible = Rect {
+            x: 0,
+            y: 25,
+            width: 1000,
+            height: 750,
+        };
+        let second_visible = Rect { x: 1000, ..visible };
+        let synthetic = DisplayOutputs::new(vec![
+            DisplayOutput {
+                id: "main".into(),
+                name: "Main".into(),
+                frame: visible,
+                is_main: true,
+            },
+            DisplayOutput {
+                id: "second".into(),
+                name: "Second".into(),
+                frame: second_visible,
+                is_main: false,
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            synthetic.display_at((500, 10)).map(|d| d.id.as_str()),
+            Some("main")
+        );
+        assert_eq!(
+            synthetic.display_at((500, 790)).map(|d| d.id.as_str()),
+            Some("main")
+        );
+        assert_eq!(
+            synthetic.display_at((1500, 10)).map(|d| d.id.as_str()),
+            Some("second")
+        );
+        assert_eq!(
+            synthetic.display_at((1500, 790)).map(|d| d.id.as_str()),
+            Some("second")
+        );
+        assert_eq!(synthetic.display_at((5000, 5000)), None);
+        assert_eq!(synthetic.display_for_point((1500, 10)).id, "second");
+
+        // Full physical bounds also resolve asymmetric Docks unambiguously (e.g. a
+        // bottom Dock on main adjacent to a full-height secondary display).
+        let with_bounds = DisplayOutputs::with_bounds(
+            vec![
+                DisplayOutput {
+                    id: "main".into(),
+                    name: "Main".into(),
+                    frame: Rect {
+                        x: 0,
+                        y: 25,
+                        width: 1000,
+                        height: 700,
+                    },
+                    is_main: true,
+                },
+                DisplayOutput {
+                    id: "second".into(),
+                    name: "Second".into(),
+                    frame: Rect {
+                        x: 1000,
+                        y: 25,
+                        width: 1000,
+                        height: 775,
+                    },
+                    is_main: false,
+                },
+            ],
+            vec![
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1000,
+                    height: 800,
+                },
+                Rect {
+                    x: 1000,
+                    y: 0,
+                    width: 1000,
+                    height: 800,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            with_bounds.display_at((990, 750)).map(|d| d.id.as_str()),
+            Some("main")
+        );
+        assert_eq!(
+            with_bounds.display_at((1000, 10)).map(|d| d.id.as_str()),
+            Some("second")
+        );
+        assert_eq!(
+            with_bounds.display_at((2000, 800)).map(|d| d.id.as_str()),
+            Some("second")
+        );
+        assert_eq!(with_bounds.display_at((2010, 800)), None);
     }
 }

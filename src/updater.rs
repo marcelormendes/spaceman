@@ -27,6 +27,7 @@
 mod bundle;
 mod protocol;
 mod stamp;
+pub use stamp::build_version;
 mod transport;
 
 use std::path::{Path, PathBuf};

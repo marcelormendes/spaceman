@@ -1,7 +1,10 @@
 //! The miniature displays at the top of Settings › Layout, drawn with the engine's own spacing
-//! math so they match what the windows will do.
+//! math so they match what the windows will do: a bezel, a dark wallpaper under a menu bar, and
+//! tiny windows with title bars and traffic lights, the same in light and dark mode.
 
-use rune::{El, Spring, col, el, row, text};
+use std::f32::consts::PI;
+
+use rune::{Color, El, Shadow, Spring, col, el, oklch, oklcha, row};
 use spaceman::{Rect, spacing::Spacing};
 
 use crate::controls::{self, Paint};
@@ -22,7 +25,14 @@ const ULTRAWIDE: Rect = Rect {
 };
 const DISPLAY_WIDTH: f32 = 300.0;
 const ULTRAWIDE_WIDTH: f32 = 196.0;
-const MENU_BAR: f32 = 5.0;
+/// The bezel round the glass, and the corner radii of each.
+const BEZEL: f32 = 3.0;
+const BEZEL_RADIUS: f32 = 9.0;
+const GLASS_RADIUS: f32 = 6.0;
+const MENU_BAR: f32 = 7.0;
+const TITLE_BAR: f32 = 7.0;
+const WINDOW_RADIUS: f32 = 3.5;
+const LIGHT: f32 = 3.5;
 const SETTLE: Spring = Spring::new(0.22, 0.0);
 
 /// Three tiles as the engine places them: one column on the left, two stacked on the right.
@@ -75,69 +85,162 @@ pub(super) fn card(p: Paint, spacing: Spacing) -> El {
         displays = displays.child(display(
             p,
             "single",
-            "One window, ultrawide",
+            "One window on an ultrawide display",
             ULTRAWIDE,
             ULTRAWIDE_WIDTH,
             &[spacing.single(spacing.usable(ULTRAWIDE))],
         ));
     }
-    controls::surface(p, col().key("preview").py(20.0).px(16.0).items_center())
+    controls::surface(p, col().key("preview").py(24.0).px(16.0).items_center())
         .label("Layout preview")
         .child(displays)
 }
 
-fn display(p: Paint, key: &str, caption: &str, screen: Rect, width: f32, windows: &[Rect]) -> El {
-    let c = &p.k.c;
+/// One display: the bezel, then the glass holding the wallpaper, the menu bar and the windows.
+fn display(p: Paint, key: &str, label: &str, screen: Rect, width: f32, windows: &[Rect]) -> El {
     let scale = width / screen.width as f32;
     let height = screen.height as f32 * scale;
-    let place = |rect: Rect| {
-        (
-            rect.x as f32 * scale,
-            MENU_BAR + rect.y as f32 * scale,
-            rect.width as f32 * scale,
-            rect.height as f32 * scale,
-        )
-    };
     let mut glass = el()
         .key("screen")
         .size(width, MENU_BAR + height)
-        .radius(6.0)
-        .fill(c.bg_deep)
-        .border(p.hair, c.border_base)
-        .clip_soft(0.0)
-        // A tinted wallpaper, so the gaps and the padded edges read as space.
-        .child(
-            el().key("wallpaper")
-                .absolute(0.0, MENU_BAR)
-                .size(width, height)
-                .fill(c.text_accent.alpha(0.22)),
-        )
-        .child(
-            el().key("menu-bar")
-                .absolute(0.0, 0.0)
-                .size(width, MENU_BAR)
-                .fill(c.layer_03),
-        );
+        .radius(GLASS_RADIUS)
+        .clip_rounded(GLASS_RADIUS)
+        .child(wallpaper(width, MENU_BAR + height))
+        .child(menu_bar(p, width));
     for (index, window) in windows.iter().enumerate() {
-        let (x, y, w, h) = place(*window);
         glass = glass.child(
-            el().key(format!("window-{index}"))
-                .absolute(x, y)
-                .size(w, h)
-                .radius(3.0)
-                .fill(c.layer_02)
-                .border(p.hair, c.border_strong)
-                .clip_soft(0.0)
-                .motion(SETTLE)
-                .child(el().key("title-bar").size(w, 4.0).fill(c.layer_03)),
+            tile(p, &format!("window-{index}"))
+                .absolute(window.x as f32 * scale, MENU_BAR + window.y as f32 * scale)
+                .size(window.width as f32 * scale, window.height as f32 * scale),
         );
     }
-    col().key(key).gap(8.0).items_center().child(glass).child(
-        text(caption)
-            .key("caption")
-            .font(p.k.ty.small)
-            .color(p.faint()),
-    )
+    let mut bezel = el()
+        .key(key)
+        .role("image")
+        .label(label)
+        .padding(BEZEL)
+        .radius(BEZEL_RADIUS)
+        .fill(oklch(0.17, 0.006, 270.0))
+        .border_gradient(p.hair, Color::WHITE.alpha(0.16), Color::BLACK.alpha(0.45))
+        .child(glass);
+    for shadow in [
+        Shadow {
+            y: 1.0,
+            blur: 2.0,
+            color: Color::BLACK.alpha(0.18),
+            ..Shadow::default()
+        },
+        Shadow {
+            y: 6.0,
+            blur: 18.0,
+            color: Color::BLACK.alpha(0.16),
+            ..Shadow::default()
+        },
+    ] {
+        bezel = bezel.box_shadow(shadow);
+    }
+    bezel
+}
+
+/// A dusk wallpaper, deep indigo into violet and teal, lit from the upper right so the gaps and
+/// the padded edges read as depth rather than a flat tint.
+fn wallpaper(width: f32, height: f32) -> El {
+    let base = el()
+        .key("wallpaper")
+        .absolute(0.0, 0.0)
+        .size(width, height)
+        .fill(oklch(0.24, 0.07, 280.0))
+        .linear_gradient(
+            PI * 0.75,
+            [
+                (0.0, oklch(0.27, 0.09, 285.0)),
+                (0.55, oklch(0.30, 0.10, 315.0)),
+                (1.0, oklch(0.25, 0.06, 225.0)),
+            ],
+        );
+    let glow = |key: &str, center: [f32; 2], tint: Color| {
+        el().key(key)
+            .absolute(0.0, 0.0)
+            .size(width, height)
+            .radial_gradient(
+                center,
+                [width * 0.6, height * 0.8],
+                [(0.0, tint), (1.0, tint.alpha(0.0))],
+            )
+    };
+    base.child(glow("glow", [0.78, 0.12], oklcha(0.62, 0.15, 330.0, 0.42)))
+        .child(glow("pool", [0.1, 1.0], oklcha(0.55, 0.10, 210.0, 0.30)))
+}
+
+/// The menu bar: a translucent strip with a logo and a menu on the left, status items on the right.
+fn menu_bar(p: Paint, width: f32) -> El {
+    let middle = MENU_BAR / 2.0;
+    let pill = |key: &str, x: f32, w: f32, alpha: f32| {
+        el().key(key)
+            .absolute(x, middle - 1.0)
+            .size(w, 2.0)
+            .radius(1.0)
+            .fill(Color::WHITE.alpha(alpha))
+    };
+    el().key("menu-bar")
+        .absolute(0.0, 0.0)
+        .size(width, MENU_BAR)
+        .fill(Color::BLACK.alpha(0.26))
+        .border_sides([0.0, 0.0, p.hair, 0.0], Color::WHITE.alpha(0.06))
+        .child(
+            el().key("logo")
+                .absolute(6.0, middle - 1.25)
+                .size(2.5, 2.5)
+                .radius(1.25)
+                .fill(Color::WHITE.alpha(0.8)),
+        )
+        .child(pill("app", 11.0, 9.0, 0.55))
+        .child(pill("menu", 22.0, 14.0, 0.3))
+        .child(pill("status", width - 30.0, 8.0, 0.3))
+        .child(pill("clock", width - 19.0, 13.0, 0.5))
+}
+
+/// A window: a hairline lit from above, a tinted title bar with muted traffic lights, and a
+/// body in the theme's own surface colour. Its frame springs as the gaps change.
+fn tile(p: Paint, key: &str) -> El {
+    let c = &p.k.c;
+    let lights = [
+        oklch(0.68, 0.15, 25.0),
+        oklch(0.80, 0.13, 85.0),
+        oklch(0.72, 0.13, 145.0),
+    ];
+    let mut bar = el()
+        .key("title-bar")
+        .w_full()
+        .h(TITLE_BAR)
+        .fill(c.layer_02)
+        .border_sides([0.0, 0.0, p.hair, 0.0], c.border_weak);
+    for (index, color) in lights.into_iter().enumerate() {
+        bar = bar.child(
+            el().key(format!("light-{index}"))
+                .absolute(
+                    3.0 + index as f32 * (LIGHT + 1.0),
+                    (TITLE_BAR - LIGHT) / 2.0,
+                )
+                .size(LIGHT, LIGHT)
+                .radius(LIGHT / 2.0)
+                .fill(color.alpha(0.85)),
+        );
+    }
+    el().key(key)
+        .radius(WINDOW_RADIUS)
+        .fill(c.bg_base)
+        .gradient(Color::WHITE.alpha(0.035), Color::WHITE.alpha(0.0))
+        .border_gradient(p.hair, Color::WHITE.alpha(0.24), Color::BLACK.alpha(0.3))
+        .box_shadow(Shadow {
+            y: 1.0,
+            blur: 4.0,
+            color: Color::BLACK.alpha(0.35),
+            ..Shadow::default()
+        })
+        .clip_rounded(WINDOW_RADIUS)
+        .motion(SETTLE)
+        .child(bar)
 }
 
 #[cfg(test)]

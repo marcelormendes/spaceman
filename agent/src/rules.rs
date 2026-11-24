@@ -6,9 +6,11 @@ use std::path::PathBuf;
 
 use spaceman::{
     WorkspaceId,
-    config::{HudStyle, UpdateChannel},
+    config::{HudStyle, MouseFollowsFocus, UpdateChannel},
 };
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+use toml_edit::{
+    Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value, value,
+};
 
 const EMPTY: &str = "# Spaceman configuration.\nversion = 1\n";
 
@@ -36,19 +38,26 @@ pub struct Doc {
     doc: DocumentMut,
     /// Why the file couldn't be read, while it can't; saving is refused until it can.
     pub error: Option<String>,
+    /// True when an external config change arrived while a drag deferred reloading.
+    pending_reload: bool,
 }
 
 impl Doc {
     pub fn load() -> Doc {
-        let path = spaceman::config::config_path();
-        let source = match path.as_ref().map(std::fs::read_to_string) {
-            Some(Ok(source)) => source,
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => EMPTY.into(),
-            Some(Err(error)) => return Doc::broken(path, format!("Couldn't read config: {error}")),
-            None => return Doc::broken(None, "HOME is unavailable".into()),
+        match spaceman::config::config_path() {
+            Some(path) => Doc::load_from(path),
+            None => Doc::broken(None, "HOME is unavailable".into()),
+        }
+    }
+
+    pub fn load_from(path: PathBuf) -> Doc {
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => EMPTY.into(),
+            Err(error) => return Doc::broken(Some(path), format!("Couldn't read config: {error}")),
         };
         let mut doc = Doc::parse(&source);
-        doc.path = path;
+        doc.path = Some(path);
         doc
     }
 
@@ -58,6 +67,7 @@ impl Doc {
                 path: None,
                 doc,
                 error: spaceman::config::Config::parse(source).err(),
+                pending_reload: false,
             },
             Err(error) => Doc::broken(None, error.to_string()),
         }
@@ -68,51 +78,125 @@ impl Doc {
             path,
             doc: DocumentMut::new(),
             error: Some(error),
+            pending_reload: false,
+        }
+    }
+
+    pub fn mark_reload_pending(&mut self) {
+        self.pending_reload = true;
+    }
+
+    pub fn reload_pending(&self) -> bool {
+        self.pending_reload
+    }
+
+    /// Reloads from this document's path (or the active config path if unset).
+    pub fn reloaded(&self) -> Doc {
+        match &self.path {
+            Some(path) => Doc::load_from(path.clone()),
+            None => Doc::load(),
         }
     }
 
     pub fn rules(&self) -> Vec<Rule> {
-        let Some(rules) = self.doc.get("rules").and_then(Item::as_array_of_tables) else {
-            return Vec::new();
-        };
-        rules
-            .iter()
-            .enumerate()
-            .filter_map(|(index, table)| {
-                let place = match table.get("action").and_then(Item::as_str)? {
-                    "float" => Place::Float,
-                    "ignore" => Place::Ignore,
-                    "route" => Place::Workspace(workspace(table.get("workspace")?)?),
-                    _ => return None,
-                };
-                Some(Rule {
-                    index,
-                    bundle_id: string(table, "bundle_id"),
-                    title: string(table, "title"),
-                    place,
-                })
-            })
-            .collect()
+        match self.doc.get("rules") {
+            Some(Item::ArrayOfTables(rules)) => rules
+                .iter()
+                .enumerate()
+                .filter_map(|(index, table)| read_rule(index, table))
+                .collect(),
+            Some(Item::Value(Value::Array(rules))) => rules
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| read_rule(index, item.as_inline_table()?))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Sends rule `index`'s windows to `place`.
     pub fn place(&mut self, index: usize, place: Place) {
-        if let Some(table) = self.rule_tables().get_mut(index) {
-            set_place(table, place);
+        match self.doc.get_mut("rules") {
+            Some(Item::ArrayOfTables(rules)) => {
+                if let Some(table) = rules.get_mut(index) {
+                    set_place(table, place);
+                }
+            }
+            Some(Item::Value(Value::Array(rules))) => {
+                if let Some(table) = rules.get_mut(index).and_then(Value::as_inline_table_mut) {
+                    set_place(table, place);
+                }
+            }
+            _ => {}
         }
     }
 
     pub fn remove(&mut self, index: usize) {
-        let rules = self.rule_tables();
-        if index < rules.len() {
-            rules.remove(index);
-        }
-        if rules.is_empty() {
+        let emptied = match self.doc.get_mut("rules") {
+            Some(Item::ArrayOfTables(rules)) => {
+                if index < rules.len() {
+                    rules.remove(index);
+                }
+                rules.is_empty()
+            }
+            Some(Item::Value(Value::Array(rules))) => {
+                if index < rules.len() {
+                    rules.remove(index);
+                }
+                rules.is_empty()
+            }
+            _ => false,
+        };
+        if emptied {
             self.doc.remove("rules");
         }
     }
 
+    /// Moves the rule matching `expected` to `place`, or reports a conflict if an
+    /// external edit modified, removed, or ambiguously shifted it.
+    pub fn place_matching(&mut self, expected: &Rule, place: Place) -> Result<(), String> {
+        let index = self.resolve_rule_index(expected).ok_or_else(|| {
+            "config.toml changed externally while editing this rule; reloaded current settings"
+                .to_owned()
+        })?;
+        self.place(index, place);
+        Ok(())
+    }
+
+    /// Removes the rule matching `expected`, or reports a conflict if an external
+    /// edit modified, removed, or ambiguously shifted it.
+    pub fn remove_matching(&mut self, expected: &Rule) -> Result<(), String> {
+        let index = self.resolve_rule_index(expected).ok_or_else(|| {
+            "config.toml changed externally while editing this rule; reloaded current settings"
+                .to_owned()
+        })?;
+        self.remove(index);
+        Ok(())
+    }
+
+    fn resolve_rule_index(&self, expected: &Rule) -> Option<usize> {
+        let rules = self.rules();
+        let same_rule = |rule: &Rule| {
+            rule.bundle_id == expected.bundle_id
+                && rule.title == expected.title
+                && rule.place == expected.place
+        };
+        if rules.get(expected.index).is_some_and(same_rule) {
+            return Some(expected.index);
+        }
+        let mut matches = rules.iter().filter(|rule| same_rule(rule));
+        let matched = matches.next()?;
+        matches.next().is_none().then_some(matched.index)
+    }
+
     pub fn add(&mut self, bundle_id: &str, place: Place) {
+        if let Some(Item::Value(Value::Array(rules))) = self.doc.get_mut("rules") {
+            let mut table = InlineTable::new();
+            table.insert("bundle_id", Value::from(bundle_id));
+            set_place(&mut table, place);
+            push_inline_table(rules, table);
+            return;
+        }
         let mut table = Table::new();
         table.insert("bundle_id", value(bundle_id));
         set_place(&mut table, place);
@@ -193,6 +277,25 @@ impl Doc {
         );
     }
 
+    /// Whether Spaceman moves the pointer on explicit focus changes, from
+    /// `settings.mouse_follows_focus` (defaults to off).
+    pub fn mouse_follows_focus(&self) -> MouseFollowsFocus {
+        self.doc
+            .get("settings")
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get("mouse_follows_focus"))
+            .and_then(Item::as_str)
+            .and_then(MouseFollowsFocus::parse)
+            .unwrap_or_default()
+    }
+
+    pub fn set_mouse_follows_focus(&mut self, mode: MouseFollowsFocus) {
+        self.set_setting(
+            "mouse_follows_focus",
+            (mode != MouseFollowsFocus::default()).then(|| value(mode.as_str())),
+        );
+    }
+
     /// Sets `key` in `[settings]`, or removes it (and an emptied table) for `None`, the default.
     fn set_setting(&mut self, key: &str, item: Option<Item>) {
         let Some(item) = item else {
@@ -220,14 +323,28 @@ impl Doc {
         }
     }
 
-    /// The display a workspace asks for in `[[workspaces]]`, if it names one.
+    /// The display a workspace asks for in `[[workspaces]]` or `workspaces = [...]`, if it names one.
     pub fn monitor(&self, workspace: WorkspaceId) -> Option<String> {
-        self.doc
-            .get("workspaces")?
-            .as_array_of_tables()?
-            .iter()
-            .find(|table| table.get("workspace").and_then(self::workspace) == Some(workspace))
-            .and_then(|table| string(table, "monitor"))
+        match self.doc.get("workspaces")? {
+            Item::ArrayOfTables(tables) => tables
+                .iter()
+                .find(|table| table_workspace(*table) == Some(workspace))
+                .and_then(|table| string(table, "monitor")),
+            Item::Value(Value::Array(entries)) => entries
+                .iter()
+                .filter_map(Value::as_inline_table)
+                .find(|table| table_workspace(*table) == Some(workspace))
+                .and_then(|table| string(table, "monitor")),
+            _ => None,
+        }
+    }
+
+    /// Named workspaces (`A`–`Z`) enabled by `[[rules]]` or `[[workspaces]]` in this file.
+    pub fn named_workspaces(&self) -> Vec<WorkspaceId> {
+        self.workspaces_with_referenced(std::iter::empty())
+            .into_iter()
+            .filter(|workspace| workspace.letter().is_some())
+            .collect()
     }
 
     /// `defaults`, followed by any other workspaces referenced in `[[rules]]` or `[[workspaces]]`.
@@ -254,22 +371,83 @@ impl Doc {
         out
     }
 
-    /// Sets the display a workspace asks for; `None` removes its entry, back to the default.
+    fn has_workspace_route(&self, workspace: WorkspaceId) -> bool {
+        self.rules()
+            .into_iter()
+            .any(|rule| rule.place == Place::Workspace(workspace))
+    }
+
+    /// Sets the display a workspace asks for; `None` clears the override back to the default,
+    /// retaining a solely declared named workspace on `"main"` so it stays enabled.
     pub fn set_monitor(&mut self, workspace: WorkspaceId, monitor: Option<&str>) {
-        let tables = self
+        let keep_named = workspace.letter().is_some() && !self.has_workspace_route(workspace);
+        if let Some(Item::Value(Value::Array(entries))) = self.doc.get_mut("workspaces") {
+            let found = entries.iter().position(|item| {
+                item.as_inline_table()
+                    .and_then(|table| table_workspace(table))
+                    == Some(workspace)
+            });
+            match (found, monitor) {
+                (Some(index), Some(monitor)) => {
+                    if let Some(table) = entries.get_mut(index).and_then(Value::as_inline_table_mut)
+                    {
+                        table.insert("monitor", Value::from(monitor));
+                    }
+                }
+                (Some(index), None) if keep_named => {
+                    if let Some(table) = entries.get_mut(index).and_then(Value::as_inline_table_mut)
+                    {
+                        table.insert("monitor", Value::from("main"));
+                    }
+                }
+                (Some(index), None) => {
+                    entries.remove(index);
+                }
+                (None, Some(monitor)) => {
+                    let mut table = InlineTable::new();
+                    TableLike::insert(&mut table, "workspace", workspace_value(workspace));
+                    table.insert("monitor", Value::from(monitor));
+                    push_inline_table(entries, table);
+                }
+                (None, None) => {}
+            }
+            if entries.is_empty() {
+                self.doc.remove("workspaces");
+            }
+            return;
+        }
+        if monitor.is_none()
+            && !self
+                .doc
+                .get("workspaces")
+                .is_some_and(Item::is_array_of_tables)
+        {
+            return;
+        }
+        if !self
             .doc
-            .entry("workspaces")
-            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
-        let Some(tables) = tables.as_array_of_tables_mut() else {
+            .get("workspaces")
+            .is_some_and(Item::is_array_of_tables)
+        {
+            self.doc.remove("workspaces");
+            self.doc
+                .insert("workspaces", Item::ArrayOfTables(ArrayOfTables::new()));
+        }
+        let Some(Item::ArrayOfTables(tables)) = self.doc.get_mut("workspaces") else {
             return;
         };
         let found = tables
             .iter()
-            .position(|table| table.get("workspace").and_then(self::workspace) == Some(workspace));
+            .position(|table| table_workspace(table) == Some(workspace));
         match (found, monitor) {
             (Some(index), Some(monitor)) => {
                 if let Some(table) = tables.get_mut(index) {
                     table.insert("monitor", value(monitor));
+                }
+            }
+            (Some(index), None) if keep_named => {
+                if let Some(table) = tables.get_mut(index) {
+                    table.insert("monitor", value("main"));
                 }
             }
             (Some(index), None) => {
@@ -289,14 +467,12 @@ impl Doc {
     }
 
     fn rule_tables(&mut self) -> &mut ArrayOfTables {
-        let entry = self
-            .doc
-            .entry("rules")
-            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
-        if !entry.is_array_of_tables() {
-            *entry = Item::ArrayOfTables(ArrayOfTables::new());
+        if !self.doc.get("rules").is_some_and(Item::is_array_of_tables) {
+            self.doc.remove("rules");
+            self.doc
+                .insert("rules", Item::ArrayOfTables(ArrayOfTables::new()));
         }
-        let Item::ArrayOfTables(tables) = entry else {
+        let Some(Item::ArrayOfTables(tables)) = self.doc.get_mut("rules") else {
             unreachable!()
         };
         tables
@@ -327,21 +503,116 @@ impl Doc {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        spaceman::state_file::write_atomic(path, source.as_bytes())
+        let _lock = spaceman::config::lock_config(path)
+            .map_err(|error| format!("failed to lock {}: {error}", path.display()))?;
+        spaceman::config::write_config_atomic(path, source.as_bytes())
             .map_err(|error| error.to_string())
+    }
+
+    /// Reloads the current file under the config lock, applies `edit`, validates, and writes
+    /// atomically so external edits survive. On a conflict or error the document reflects the
+    /// current file on disk so the user can retry without losing external changes.
+    pub fn edit_and_save(
+        &mut self,
+        edit: impl FnOnce(&mut Doc) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let Some(path) = self.path.clone() else {
+            let before = self.clone();
+            if let Err(error) = edit(self) {
+                *self = before;
+                return Err(error);
+            }
+            if let Err(error) = self.save() {
+                *self = before;
+                return Err(error);
+            }
+            return Ok(());
+        };
+        let _lock = spaceman::config::lock_config(&path)
+            .map_err(|error| format!("failed to lock {}: {error}", path.display()))?;
+        let mut fresh = Doc::load_from(path.clone());
+        if let Some(error) = &fresh.error {
+            let message = format!("config.toml has an error to fix first: {error}");
+            *self = fresh;
+            return Err(message);
+        }
+        let loaded = fresh.clone();
+        if let Err(error) = edit(&mut fresh) {
+            *self = loaded;
+            return Err(error);
+        }
+        let source = fresh.source();
+        if let Err(error) = spaceman::config::Config::parse(&source) {
+            *self = loaded;
+            return Err(error);
+        }
+        if let Err(error) = spaceman::config::write_config_atomic(&path, source.as_bytes()) {
+            *self = loaded;
+            return Err(error.to_string());
+        }
+        *self = fresh;
+        Ok(())
     }
 }
 
-fn string(table: &Table, key: &str) -> Option<String> {
+fn read_rule(index: usize, table: &dyn TableLike) -> Option<Rule> {
+    let place = match table.get("action").and_then(Item::as_str)? {
+        "float" => Place::Float,
+        "ignore" => Place::Ignore,
+        "route" => Place::Workspace(workspace(table.get("workspace")?)?),
+        _ => return None,
+    };
+    Some(Rule {
+        index,
+        bundle_id: string(table, "bundle_id"),
+        title: string(table, "title"),
+        place,
+    })
+}
+
+fn table_workspace(table: &dyn TableLike) -> Option<WorkspaceId> {
+    table.get("workspace").and_then(workspace)
+}
+
+fn push_inline_table(array: &mut Array, mut table: InlineTable) {
+    table.fmt();
+    let mut item = Value::InlineTable(table);
+    if let Some(prefix) = array
+        .iter()
+        .last()
+        .and_then(|last| last.decor().prefix())
+        .and_then(|raw| raw.as_str())
+        .and_then(multiline_indent_prefix)
+    {
+        item.decor_mut().set_prefix(prefix);
+        array.push_formatted(item);
+    } else {
+        array.push(item);
+    }
+}
+
+fn multiline_indent_prefix(prefix: &str) -> Option<String> {
+    let newline = prefix.rfind('\n')?;
+    let start = if newline > 0 && prefix.as_bytes()[newline - 1] == b'\r' {
+        newline - 1
+    } else {
+        newline
+    };
+    let indent = &prefix[newline + 1..];
+    indent
+        .chars()
+        .all(|ch| ch == ' ' || ch == '\t')
+        .then(|| prefix[start..].to_owned())
+}
+
+fn string(table: &dyn TableLike, key: &str) -> Option<String> {
     table.get(key).and_then(Item::as_str).map(str::to_owned)
 }
 
 fn workspace(item: &Item) -> Option<WorkspaceId> {
     match item.as_value()? {
-        toml_edit::Value::Integer(number) => {
-            WorkspaceId::new(u8::try_from(*number.value()).ok()?).ok()
-        }
-        toml_edit::Value::String(name) => WorkspaceId::parse(name.value()).ok(),
+        Value::Integer(number) => WorkspaceId::new(u8::try_from(*number.value()).ok()?).ok(),
+        Value::String(name) => WorkspaceId::parse(name.value()).ok(),
         _ => None,
     }
 }
@@ -353,7 +624,7 @@ fn workspace_value(workspace: WorkspaceId) -> Item {
     }
 }
 
-fn set_place(table: &mut Table, place: Place) {
+fn set_place(table: &mut dyn TableLike, place: Place) {
     match place {
         Place::Workspace(workspace) => {
             table.insert("action", value("route"));
@@ -371,6 +642,7 @@ fn set_place(table: &mut Table, place: Place) {
     }
 }
 
+mod shortcuts;
 mod spacing;
 #[cfg(test)]
 mod tests;

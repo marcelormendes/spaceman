@@ -15,17 +15,68 @@ while [ $# -gt 0 ]; do
     *) echo "usage: $0 [--bundle PATH] [--wait-idle SECS]" >&2; exit 2 ;;
   esac
 done
+resolve_path() {
+  _rp_target=$1
+  _rp_suffix=
+  while [ ! -e "$_rp_target" ]; do
+    _rp_parent=$(dirname -- "$_rp_target")
+    [ "$_rp_parent" = "$_rp_target" ] && break
+    _rp_suffix="/$(basename -- "$_rp_target")$_rp_suffix"
+    _rp_target=$_rp_parent
+  done
+  if [ -e "$_rp_target" ]; then
+    _rp_resolved=$(realpath -- "$_rp_target" 2>/dev/null || {
+      if [ -d "$_rp_target" ]; then
+        (CDPATH= cd -P -- "$_rp_target" && pwd -P)
+      else
+        _rp_dir=$(CDPATH= cd -P -- "$(dirname -- "$_rp_target")" && pwd -P)
+        printf '%s/%s\n' "${_rp_dir%/}" "$(basename -- "$_rp_target")"
+      fi
+    })
+    if [ -z "$_rp_suffix" ]; then
+      printf '%s\n' "$_rp_resolved"
+    else
+      printf '%s%s\n' "${_rp_resolved%/}" "$_rp_suffix"
+    fi
+  else
+    printf '%s%s\n' "$_rp_target" "$_rp_suffix"
+  fi
+}
+
+paths_overlap() {
+  _po_a=${1%/}
+  _po_b=${2%/}
+  [ "$_po_a" = "$_po_b" ] && return 0
+  case "$_po_a" in "$_po_b"/*) return 0 ;; esac
+  case "$_po_b" in "$_po_a"/*) return 0 ;; esac
+  return 1
+}
+
 # build-app.sh prints the built bundle path on its last line.
 [ -n "$source_bundle" ] || source_bundle=$("$root/scripts/build-app.sh" | tail -n 1)
 [ -d "$source_bundle/Contents" ] || { echo "no Spaceman.app at $source_bundle" >&2; exit 1; }
+install_root="/Applications"
+installed_bundle="$install_root/Spaceman.app"
+legacy_bundle="$install_root/Pane.app"
+cli_root="$HOME/.local/bin"
+was_automatic=false
+
+source_real=$(resolve_path "$source_bundle")
+installed_real=$(resolve_path "$installed_bundle")
+legacy_real=$(resolve_path "$legacy_bundle")
+if paths_overlap "$source_real" "$installed_real"; then
+  echo "refusing to install $source_bundle over itself ($installed_bundle)" >&2
+  exit 1
+fi
+if paths_overlap "$source_real" "$legacy_real"; then
+  echo "refusing to install $source_bundle because installation removes $legacy_bundle" >&2
+  exit 1
+fi
+
 if [ -n "$wait_idle" ]; then
   idle_seconds() { ioreg -c IOHIDSystem | awk '/HIDIdleTime/ { print int($NF / 1000000000); exit }'; }
   while [ "$(idle_seconds)" -lt "$wait_idle" ]; do sleep 5; done
 fi
-install_root="/Applications"
-installed_bundle="$install_root/Spaceman.app"
-cli_root="$HOME/.local/bin"
-was_automatic=false
 
 mkdir -p "$install_root"
 if pgrep -x spaceman-agent >/dev/null 2>&1; then

@@ -30,6 +30,8 @@ pub(crate) enum SemanticKey {
     Tab,
     Space,
     Workspace(u8),
+    /// A key that types no character (an arrow, Return, an F-key), by virtual key code.
+    KeyCode(u16),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,6 +229,7 @@ fn semantic_key_code(key: SemanticKey) -> Result<u32, ResolveError> {
         // Option+Shift variants therefore remain usable on layouts where digits need Shift.
         SemanticKey::Workspace(number @ 1..=10) => Ok(WORKSPACE_NUMBER_ROW[number as usize - 1]),
         SemanticKey::Workspace(_) => Err(ResolveError::InvalidSemanticKey(key)),
+        SemanticKey::KeyCode(key_code) => Ok(u32::from(key_code)),
     }
 }
 

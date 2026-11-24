@@ -236,3 +236,106 @@ fn an_unmanaged_focused_window_is_rejected_clearly() {
 
     assert_eq!(error, "Focused window is not managed by Spaceman");
 }
+
+/// A tile and a non-resizable dialog on workspace 1, the dialog focused.
+fn tile_and_focused_dialog() -> WorkspaceRuntime<FakeBackend> {
+    let (tile, dialog) = (window(10), window(20));
+    let frames = [(tile.clone(), frame(50)), (dialog.clone(), frame(500))];
+    let mut observed = observation_for_windows("com.example.Test", &dialog, &frames);
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        for observed in windows.iter_mut().filter(|observed| observed.id == dialog) {
+            observed.resizable = false;
+        }
+    }
+    let backend = FakeBackend {
+        frames: frames.into_iter().collect(),
+        focused: Some(dialog.clone()),
+        frontmost: Some(dialog.app.clone()),
+        observation: Some(observed),
+        ..FakeBackend::default()
+    };
+    let mut runtime = runtime(backend);
+    runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&tile),
+        Some(WorkspaceId::ONE)
+    );
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&dialog),
+        Some(WorkspaceId::ONE)
+    );
+    runtime
+}
+
+/// #135: Fullscreen Layout and the axis toggle act on the workspace that owns
+/// a focused floating window, not only on a focused tile's workspace.
+#[test]
+fn workspace_layout_commands_accept_a_focused_floating_window() {
+    let cancelled = AtomicBool::new(false);
+    let dialog = window(20);
+    let mut runtime = tile_and_focused_dialog();
+    let dialog_frame = runtime.backend.frames[&dialog];
+
+    runtime
+        .toggle_fullscreen_layout(outputs(), &cancelled)
+        .unwrap();
+    assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    assert_ne!(
+        runtime.workspaces.preferred_focus(WorkspaceId::ONE),
+        Some(dialog.clone()),
+        "a float is never the Fullscreen Layout tile"
+    );
+    assert_eq!(runtime.backend.frames[&dialog], dialog_frame);
+
+    runtime
+        .toggle_fullscreen_layout(outputs(), &cancelled)
+        .unwrap();
+    assert!(!runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+
+    runtime
+        .toggle_fullscreen_layout(outputs(), &cancelled)
+        .unwrap();
+    let axis = runtime.workspaces.engine(WorkspaceId::ONE).root_axis();
+    runtime.toggle_layout(outputs(), &cancelled).unwrap();
+    assert!(!runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    assert_ne!(
+        runtime.workspaces.engine(WorkspaceId::ONE).root_axis(),
+        axis
+    );
+    assert_eq!(runtime.backend.frames[&dialog], dialog_frame);
+}
+
+/// #138: leaving a workspace while one of its floats has focus keeps the
+/// remembered tile, so coming back focuses it rather than the first tile.
+#[test]
+fn leaving_with_a_float_focused_keeps_the_remembered_tile() {
+    let (first, remembered, floating) = (window(10), window(20), window(30));
+    let mut backend = FakeBackend::default();
+    backend.frames.insert(first.clone(), frame(50));
+    backend.frames.insert(remembered.clone(), frame(500));
+    backend.frames.insert(floating.clone(), frame(100));
+    let mut runtime = runtime(backend);
+    bind(&mut runtime, WorkspaceId::ONE, &first);
+    bind(&mut runtime, WorkspaceId::ONE, &remembered);
+    runtime
+        .workspaces
+        .own_floating(floating.clone(), WorkspaceId::ONE);
+    runtime
+        .workspaces
+        .remember_focus(WorkspaceId::ONE, &remembered);
+    let cancelled = AtomicBool::new(false);
+    let two = WorkspaceId::new(2).unwrap();
+
+    runtime.backend.focused = Some(floating.clone());
+    runtime.switch(two, outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.preferred_focus(WorkspaceId::ONE),
+        Some(remembered.clone())
+    );
+
+    runtime.backend.focused = None;
+    runtime
+        .switch(WorkspaceId::ONE, outputs(), &cancelled)
+        .unwrap();
+    assert_eq!(runtime.backend.focused, Some(remembered));
+}

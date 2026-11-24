@@ -10,11 +10,10 @@ pub const ID_TOGGLE_FLOAT: &str = "toggle-float";
 pub const ID_TOGGLE_PIN: &str = "toggle-pin";
 pub const ID_UNPIN_OTHER: &str = "unpin-other";
 
-/// Side effects triggered by an interactive HUD overlay: switching workspaces, opening Settings,
-/// and reading or editing per-app `config.toml` rules.
+/// Side effects triggered by an interactive HUD overlay: switching workspaces and reading or
+/// editing per-app `config.toml` rules.
 pub trait HudSink: Send + Sync + 'static {
     fn switch_workspace(&self, workspace: WorkspaceId);
-    fn open_settings(&self);
     fn app_place(&self, bundle_id: &str) -> Option<Place>;
     fn set_app_place(&self, bundle_id: &str, place: Option<Place>) -> Result<(), String>;
 }
@@ -26,8 +25,6 @@ pub struct NoopHudSink;
 #[cfg(test)]
 impl HudSink for NoopHudSink {
     fn switch_workspace(&self, _workspace: WorkspaceId) {}
-
-    fn open_settings(&self) {}
 
     fn app_place(&self, _bundle_id: &str) -> Option<Place> {
         None
@@ -59,10 +56,6 @@ impl HudSink for LiveHudSink {
     fn switch_workspace(&self, workspace: WorkspaceId) {
         self.bridge
             .send(spaceman::app::UiAction::SwitchWorkspace(workspace));
-    }
-
-    fn open_settings(&self) {
-        self.bridge.send(spaceman::app::UiAction::OpenSettings);
     }
 
     fn app_place(&self, bundle_id: &str) -> Option<Place> {

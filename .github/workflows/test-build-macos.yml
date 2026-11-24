@@ -1,0 +1,97 @@
+name: Test build (macOS arm64)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-build-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-unsigned:
+    name: macOS checks & unsigned arm64 build
+    if: github.repository != 'anomalyco/spaceman'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.100.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting and code shape
+        run: |
+          cargo fmt --all -- --check
+          scripts/file-size.sh
+          scripts/folder-shape.sh
+          scripts/validate-release.sh --metadata-only
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --workspace --all-targets
+      - name: Replay and config check
+        run: |
+          cargo run --locked -- replay fixtures/ghostty-tab-replacement.json
+          cargo run --locked -- config-check config.example.toml
+      - name: Build unsigned Spaceman.app (arm64)
+        run: |
+          set -euo pipefail
+          deployment_target=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw app/Info.plist)
+          sdk_version=$(/usr/bin/xcrun --sdk macosx --show-sdk-version)
+
+          # Leave SPACEMAN_RELEASE_BUILD unset so this test build never auto-updates
+          # over itself from the upstream release channel.
+          unset SPACEMAN_RELEASE_BUILD SPACEMAN_RELEASE_CHANNEL SPACEMAN_RELEASE_VERSION
+          cargo build --release --locked --workspace --bins
+
+          for executable in spaceman-agent spaceman; do
+            path="target/release/$executable"
+            patched="$path.deployment-target"
+            /usr/bin/vtool -set-build-version macos "$deployment_target" "$sdk_version" \
+              -replace -output "$patched" "$path"
+            /bin/chmod 755 "$patched"
+            /bin/mv "$patched" "$path"
+          done
+
+          bundle="$PWD/target/Spaceman.app"
+          icon_output="$PWD/target/AppIcon.assets"
+          icon_info="$PWD/target/AppIcon-info.plist"
+          rm -rf "$bundle" "$icon_output"
+          mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$icon_output"
+
+          cp target/release/spaceman-agent "$bundle/Contents/MacOS/spaceman-agent"
+          cp target/release/spaceman "$bundle/Contents/MacOS/spaceman"
+          cp app/Info.plist "$bundle/Contents/Info.plist"
+
+          xcrun actool app/AppIcon.icon \
+            --compile "$icon_output" \
+            --platform macosx \
+            --minimum-deployment-target "$deployment_target" \
+            --app-icon AppIcon \
+            --standalone-icon-behavior all \
+            --output-partial-info-plist "$icon_info" \
+            --output-format human-readable-text \
+            --warnings \
+            --notices
+          cp "$icon_output/AppIcon.icns" "$icon_output/Assets.car" "$bundle/Contents/Resources/"
+          plutil -lint "$bundle/Contents/Info.plist"
+
+          # Ad-hoc sign after vtool rewrites load commands so Apple Silicon launches it cleanly.
+          codesign --force --sign - "$bundle/Contents/MacOS/spaceman-agent"
+          codesign --force --sign - "$bundle/Contents/MacOS/spaceman"
+          codesign --force --sign - --identifier anomaly.spaceman "$bundle"
+          codesign --verify --deep --strict "$bundle"
+
+          mkdir -p "$RUNNER_TEMP/dist"
+          /usr/bin/ditto -c -k --keepParent "$bundle" "$RUNNER_TEMP/dist/Spaceman-macos-arm64-unsigned.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Spaceman-macos-arm64-unsigned
+          path: ${{ runner.temp }}/dist/Spaceman-macos-arm64-unsigned.zip
+          retention-days: 30
+          if-no-files-found: error

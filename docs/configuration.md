@@ -68,15 +68,17 @@ Rules run in file order and the first matching rule wins. An unmatched window is
 
 - `float` excludes the window from tiling and resizing, preserves its native frame, and keeps it with
   the logical workspace where it was first observed.
-- `route` assigns a newly inserted resizable logical window to workspace 1 through 10 or a configured
-  named workspace A through Z. A bundle-level `route` rule (without `title`) applies to the
-  application's initial window while secondary windows opened later stay on the active workspace; a
-  `title`-matched `route` rule routes every matching window. Movable
-  non-resizable windows remain floating on the workspace where first observed. A rule does not
-  repeatedly route existing slots, including a Ghostty native-tab physical replacement.
+- `route` assigns a resizable logical window to workspace 1 through 10 or a configured named
+  workspace A through Z. When a `route` rule is added or changed, matching open windows move to the
+  target workspace immediately. For newly opened windows afterward, a bundle-level `route` rule
+  (without `title`) applies to the application's initial window while secondary windows opened later
+  stay on the active workspace; a `title`-matched `route` rule routes every matching window. Movable
+  non-resizable windows remain floating on the workspace where first observed. An unchanged rule does
+  not repeatedly route existing slots (including manually moved windows or a Ghostty native-tab
+  physical replacement).
 - `ignore` leaves the window entirely alone: never tiled, never owned by a workspace, never moved or
-  parked. Use it for applications that insist on positioning their own windows. A previously managed
-  window is released the next time it is observed on screen.
+  parked. Use it for applications that insist on positioning their own windows. Previously managed
+  windows (including parked ones) are restored and released when the rule reloads.
 
 During the startup recovery window, an unmatched window of an application that has not yet been seen
 in the session may return to a remembered workspace; see
@@ -177,12 +179,13 @@ normal recovery data.
 
 ## Applying Changes
 
-Edits saved in Spaceman Settings or in an external editor take effect automatically: rule changes,
-workspace display assignments, `settings.hud`, `settings.hud_style`, `settings.gaps`, and
-`settings.single_window_max_width` reload without restarting (Settings › Layout retiles at once; an
-external edit applies on the next retile);
-`settings.update_channel` applies at the next update check. Global shortcuts for a
-newly added named workspace letter (`Option+A` ... `Option+Z`) register on the next app start:
+Edits saved in Spaceman Settings or in an external editor take effect automatically without
+restarting: rule changes move, float, tile, or release matching open windows right away; workspace
+display assignments, newly referenced named workspace shortcuts (`Option+A` ... `Option+Z`),
+`settings.hud`, `settings.hud_style`, `settings.gaps`, and `settings.single_window_max_width` reload
+live (Settings › Rules, Workspaces, and Layout retile at once; external edits apply on the next
+retile); `settings.update_channel` applies at the next update check. If you ever want a clean
+restart:
 
 ```sh
 spaceman ctl pause

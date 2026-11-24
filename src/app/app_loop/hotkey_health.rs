@@ -54,6 +54,28 @@ impl MainThreadAgent {
         }
     }
 
+    /// Registers global shortcuts for any newly configured named workspaces
+    /// without requiring an app restart.
+    pub(super) fn refresh_hotkey_workspaces(&mut self, named: &[(WorkspaceId, DisplaySelector)]) {
+        let mut next = self.hotkey_workspaces.clone();
+        for (workspace, selector) in named {
+            if self.scope.manages_selector(selector) && !next.contains(workspace) {
+                next.push(*workspace);
+            }
+        }
+        next.sort();
+        if next == self.hotkey_workspaces {
+            return;
+        }
+        self.hotkey_workspaces = next;
+        if self.hotkeys.is_some() {
+            match HotkeyPlan::current(&self.hotkey_workspaces) {
+                Ok(plan) => self.reinstall_hotkeys(plan),
+                Err(error) => log_event!("hotkeys: could not plan shortcuts: {error}"),
+            }
+        }
+    }
+
     pub(super) fn reinstall_hotkeys(&mut self, plan: HotkeyPlan) {
         // Carbon cannot register the replacement chords until the old ones are released.
         self.hotkeys = None;

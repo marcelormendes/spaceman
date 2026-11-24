@@ -457,7 +457,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     /// Durably record `frame` as the window's recovery frame, replacing any
     /// earlier one; memory rolls back when persistence fails.
-    fn record_recovery(&mut self, window: &crate::PhysicalWindowId, frame: crate::Rect) -> bool {
+    pub(super) fn record_recovery(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        frame: crate::Rect,
+    ) -> bool {
         let previous = self.parked.insert(window.clone(), frame);
         if previous == Some(frame) {
             return true;

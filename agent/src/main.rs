@@ -262,10 +262,7 @@ impl Ui {
         if self.doc.spacing() == spacing {
             return;
         }
-        self.edit(|doc| doc.set_spacing(spacing));
-        if self.error.is_none() {
-            self.send_action(UiAction::Retile);
-        }
+        self.edit_and_retile(|doc| doc.set_spacing(spacing));
     }
 
     pub fn mark_wrong(&self) {
@@ -295,6 +292,15 @@ impl Ui {
             }
         }
         self.look_up_apps();
+    }
+
+    /// Applies `edit`, saves, and retiles at once so rule and workspace changes
+    /// take effect immediately.
+    pub fn edit_and_retile(&mut self, edit: impl FnOnce(&mut Doc)) {
+        self.edit(edit);
+        if self.error.is_none() {
+            self.send_action(UiAction::Retile);
+        }
     }
 
     pub fn open_add_menu(&mut self, place: Place) {

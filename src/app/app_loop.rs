@@ -498,9 +498,10 @@ impl MainThreadAgent {
                 if probe.config_stamp != self.config_stamp {
                     config_changed = true;
                     self.config_stamp = probe.config_stamp;
-                    if let Some(hud) = probe.hud {
-                        self.hud = hud;
-                        status_item::set_hud(hud);
+                    if let Some(config) = probe.config {
+                        self.hud = config.hud;
+                        status_item::set_hud(config.hud);
+                        self.refresh_hotkey_workspaces(&config.named_workspaces);
                     }
                 }
             }

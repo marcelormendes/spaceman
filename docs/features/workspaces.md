@@ -195,12 +195,18 @@ on the same letter.
   `unrelated_rule_reload_preserves_manually_moved_windows`,
   `ignoring_a_hidden_parked_window_restores_and_releases_it`,
   `rule_reload_retries_only_failed_or_unavailable_windows`).
-- Unit (FakeBackend), `src/app/tests/reconciliation.rs`: adoption order
+- Unit (FakeBackend), `src/app/tests/rules.rs` & `src/app/tests/reconciliation.rs`: adoption order
   (`bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace`,
   `title_route_rule_routes_matching_secondary_window`,
   `ignore_rule_releases_the_window_and_never_adopts_it`,
   `floating_rule_owns_window_without_adding_it_to_layout`,
-  `new_window_opens_on_active_workspace_even_when_app_has_window_on_inactive_workspace`), display fallback
+  `new_window_opens_on_active_workspace_even_when_app_has_window_on_inactive_workspace`,
+  `focused_window_routed_to_hidden_workspace_suppresses_focus_follow`,
+  `failed_cross_display_floating_carry_retries_on_adoption_and_rule_reload`,
+  `reassigned_workspace_retries_failed_recovery_and_floating_carry_idempotently`,
+  `parked_floating_window_reloaded_across_displays_to_visible_lands_at_translated_frame`,
+  `failed_sibling_initial_route_retries_even_after_first_sibling_succeeds`,
+  `park_inactive_cross_display_failure_keeps_persisted_recovery_frame`), display fallback
   (`missing_preferred_display_falls_back_without_double_visibility`,
   `active_preferred_workspace_falls_back_and_returns_after_hotplug`).
 - Unit (FakeBackend), `src/app/tests/parking.rs`: parking without minimizing, re-parking windows that

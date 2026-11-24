@@ -6,7 +6,7 @@ use crate::journal::PlacementSource;
 const MAX_INITIAL_ROUTE_ATTEMPTS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PendingInitialRoute {
+pub(in crate::app) struct PendingInitialRoute {
     pub(super) source: WorkspaceId,
     pub(super) target: WorkspaceId,
     pub(super) attempts: u8,

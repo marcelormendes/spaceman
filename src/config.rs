@@ -213,7 +213,6 @@ struct RawWorkspace {
 
 impl Config {
     #[must_use]
-    #[cfg(test)]
     pub fn has_rules(&self) -> bool {
         !self.rules.is_empty()
     }

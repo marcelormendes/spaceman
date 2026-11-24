@@ -19,6 +19,10 @@ pub(super) enum FrozenWindowAffinity {
 pub(super) struct FrozenAffinityPolicy {
     pub(super) windows: HashMap<crate::PhysicalWindowId, FrozenWindowAffinity>,
     pub(super) visible_workspaces: HashSet<WorkspaceId>,
+    /// Newly observed non-resizable windows that matched a `route` rule and must
+    /// be owned as floating on their target workspace (parked if hidden, carried
+    /// across displays if visible elsewhere).
+    pub(super) floating_routes: Vec<(crate::PhysicalWindowId, WorkspaceId, crate::Rect)>,
 }
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
@@ -52,6 +56,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // one terminated.
         self.note_absent_departures(observation);
         let mut affinities = HashMap::new();
+        let mut floating_routes = Vec::new();
         for application in &observation.applications {
             let crate::AppObservation::Complete { app, windows, .. } = application else {
                 continue;
@@ -68,7 +73,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
             self.prepare_recall(app, windows);
-            let mut app_owns_window = self.workspaces.app_owns_windows(&app.id);
+            // Freeze prior ownership for the whole snapshot so all windows of a
+            // newly seen app open at startup follow its route rule together, and
+            // a leading non-resizable window cannot block the app's main window.
+            let app_owns_window = self.workspaces.app_owns_windows(&app.id);
             for window in windows {
                 self.heal_reappeared_window(window, visible, server_frames);
                 let disposition = self.config.disposition(&app.bundle_id, window);
@@ -113,8 +121,22 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     affinity
                 } else if floating && self.workspaces.floating_workspace_of(&window.id).is_some() {
                     FrozenWindowAffinity::Floating
+                } else if floating
+                    && let WindowDisposition::Route(target) = disposition
+                    && (!app_owns_window || self.config.route_matches_title(&app.bundle_id, window))
+                {
+                    if !self
+                        .scope
+                        .manages_selector(self.workspaces.assignment(target))
+                    {
+                        return Err(format!(
+                            "window rule routes to unmanaged workspace {}",
+                            target
+                        ));
+                    }
+                    floating_routes.push((window.id.clone(), target, window.frame));
+                    FrozenWindowAffinity::Floating
                 } else if floating && let Some(placement) = self.memory.recalled(&window.id) {
-                    app_owns_window = true;
                     self.workspaces
                         .own_floating(window.id.clone(), placement.workspace);
                     self.note_placement(&window.id, PlacementSource::Recall, placement.workspace);
@@ -124,7 +146,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         .iter()
                         .find(|resolved| resolved.output.contains_center(window.frame))
                         .map_or(FrozenWindowAffinity::CurrentDisplay, |resolved| {
-                            app_owns_window = true;
                             log_event!(
                                 "adopt floating {:?} -> workspace {}",
                                 window.id,
@@ -154,21 +175,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             if !app_owns_window
                                 || self.config.route_matches_title(&app.bundle_id, window)
                             {
-                                app_owns_window = true;
                                 FrozenWindowAffinity::ExplicitRoute(target)
                             } else {
                                 FrozenWindowAffinity::CurrentDisplay
                             }
                         }
-                        WindowDisposition::Managed => {
-                            app_owns_window = true;
-                            self.memory
-                                .recalled(&window.id)
-                                .map(|placement| {
-                                    FrozenWindowAffinity::Inferred(placement.workspace)
-                                })
-                                .unwrap_or(FrozenWindowAffinity::CurrentDisplay)
-                        }
+                        WindowDisposition::Managed => self
+                            .memory
+                            .recalled(&window.id)
+                            .map(|placement| FrozenWindowAffinity::Inferred(placement.workspace))
+                            .unwrap_or(FrozenWindowAffinity::CurrentDisplay),
                         WindowDisposition::Floating | WindowDisposition::Ignored => unreachable!(),
                     }
                 };
@@ -178,7 +194,64 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         Ok(FrozenAffinityPolicy {
             windows: affinities,
             visible_workspaces: visible.iter().map(|resolved| resolved.workspace).collect(),
+            floating_routes,
         })
+    }
+
+    /// Routes newly observed non-resizable windows that matched a `route` rule
+    /// to their target workspace while keeping them floating (never tiled).
+    pub(super) fn apply_floating_routes(
+        &mut self,
+        routes: &[(crate::PhysicalWindowId, WorkspaceId, crate::Rect)],
+        visible: &[ResolvedWorkspace],
+        outputs: &macos::DisplayOutputs,
+        failed: &mut usize,
+    ) {
+        if routes.is_empty() {
+            return;
+        }
+        let visible_workspaces: HashSet<_> =
+            visible.iter().map(|resolved| resolved.workspace).collect();
+        for (window, target, frame) in routes {
+            let source_output = visible
+                .iter()
+                .find(|resolved| resolved.output.contains_center(*frame))
+                .map(|resolved| resolved.output);
+            let target_output = output_for(&self.workspaces, *target, outputs);
+            if visible_workspaces.contains(target) {
+                log_event!("route floating {:?} -> workspace {}", window, target);
+                self.workspaces.own_floating(window.clone(), *target);
+                self.note_placement(window, PlacementSource::Rule, *target);
+                if let Some(source_output) = source_output
+                    && source_output != target_output
+                    && !self.carry_floating_window(window, source_output, target_output)
+                {
+                    *failed += 1;
+                }
+            } else {
+                let outcome = match source_output {
+                    Some(source_output) if source_output != target_output => {
+                        self.park_window_across(window, source_output, target_output, outputs)
+                    }
+                    _ => self.park_window(window, target_output, outputs),
+                };
+                match outcome {
+                    macos::ApplyOutcome::Applied => {
+                        log_event!(
+                            "route floating {:?} -> workspace {} (parked)",
+                            window,
+                            target
+                        );
+                        self.workspaces.own_floating(window.clone(), *target);
+                        self.note_placement(window, PlacementSource::Rule, *target);
+                    }
+                    macos::ApplyOutcome::Gone => {}
+                    _ => {
+                        *failed += 1;
+                    }
+                }
+            }
+        }
     }
 
     /// Hidden workspaces are not reconciled, so an app that quit while its

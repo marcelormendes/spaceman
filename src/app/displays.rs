@@ -10,9 +10,67 @@ use super::*;
 pub(super) struct DisplayWatch {
     known: Option<macos::DisplayOutputs>,
     repark_pending: HashSet<crate::PhysicalWindowId>,
+    /// Workspaces whose display assignment changed on config reload, mapped to
+    /// the selector they moved from until the next cycle relocates their
+    /// recovery frames and floating windows.
+    reassigned: HashMap<WorkspaceId, DisplaySelector>,
 }
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
+    /// Record that a config reload moved `workspace` off `previous`. Keeps the
+    /// earliest source selector if multiple edits arrive before the next cycle.
+    pub(super) fn note_reassigned_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        previous: DisplaySelector,
+    ) {
+        self.displays
+            .reassigned
+            .entry(workspace)
+            .or_insert(previous);
+    }
+
+    /// Translate parked recovery frames and carry visible floating windows for
+    /// workspaces whose display assignment changed on config reload.
+    pub(super) fn relocate_reassigned_workspaces(
+        &mut self,
+        outputs: &macos::DisplayOutputs,
+        visible: &[ResolvedWorkspace],
+        failed: &mut usize,
+    ) {
+        if self.displays.reassigned.is_empty() {
+            return;
+        }
+        let visible_workspaces: HashSet<_> =
+            visible.iter().map(|resolved| resolved.workspace).collect();
+        let reassigned = std::mem::take(&mut self.displays.reassigned);
+        for (workspace, old_selector) in reassigned {
+            let old_output = outputs.resolve(&old_selector).frame;
+            let new_output = output_for(&self.workspaces, workspace, outputs);
+            if old_output == new_output {
+                continue;
+            }
+            let is_visible = visible_workspaces.contains(&workspace);
+            for window in self.workspaces.windows(workspace) {
+                if let Some(original) = self.parked.get(&window).copied() {
+                    if old_output.contains_center(original) {
+                        let relocated = super::move_workspace::translate_frame_to_output(
+                            original, old_output, new_output,
+                        );
+                        if !self.record_recovery(&window, relocated) {
+                            *failed += 1;
+                        }
+                    }
+                } else if is_visible
+                    && self.workspaces.floating_workspace_of(&window) == Some(workspace)
+                    && !self.carry_floating_window(&window, old_output, new_output)
+                {
+                    *failed += 1;
+                }
+            }
+        }
+    }
+
     /// How tiles fill `output`: its frame with the configured gaps, padding and width cap.
     pub(super) fn layout_settings(&self, output: crate::Rect) -> Settings {
         Settings::for_output(output).spaced(self.config.spacing())

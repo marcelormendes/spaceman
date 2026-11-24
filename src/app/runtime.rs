@@ -151,7 +151,15 @@ impl WorkspaceRuntime<MacWorkspaceBackend> {
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// Rules apply to open and future windows; named workspaces and display assignments update.
     pub(super) fn replace_config(&mut self, config: Config) {
+        let before: Vec<_> = WorkspaceId::all()
+            .map(|workspace| (workspace, self.workspaces.assignment(workspace).clone()))
+            .collect();
         config.configure_workspaces(&mut self.workspaces);
+        for (workspace, previous) in before {
+            if self.workspaces.assignment(workspace) != &previous {
+                self.note_reassigned_workspace(workspace, previous);
+            }
+        }
         let previous = std::mem::replace(&mut self.config, config);
         match &mut self.pending_rule_reload {
             Some(pending) => pending.advance_for_new_reload(previous),
@@ -316,6 +324,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         });
         let persisted_workspace_state = workspaces.state();
         let manual_floating = super::commands::restored_floating(&workspaces);
+        let pending_rule_reload = (restored_workspace_state && config.has_rules())
+            .then(|| cycle::PendingRuleReload::new(Config::default()));
         Self {
             backend,
             scope,
@@ -334,7 +344,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             minimum_sizes: HashMap::new(),
             manual_floating,
             config,
-            pending_rule_reload: None,
+            pending_rule_reload,
             foreground_lanes: HashMap::new(),
             last_focused_workspace: None,
             previous_focused_workspace: None,

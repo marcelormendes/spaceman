@@ -97,6 +97,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.synchronize_foreground(&outputs);
         self.follow_displays(&outputs);
         let visible = self.visible_workspaces(&outputs);
+        self.relocate_reassigned_workspaces(&outputs, &visible, &mut failed);
         let frontmost = self.backend.frontmost_application();
         let focused = self.backend.focused_window();
         let focused_is_frontmost = focused.as_ref().is_some_and(|focused| {
@@ -183,6 +184,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         });
         let affinity_policy =
             self.freeze_window_affinities(&observation, &visible, server_frames)?;
+        self.apply_floating_routes(
+            &affinity_policy.floating_routes,
+            &visible,
+            &outputs,
+            &mut failed,
+        );
         // Taken after the Accessibility snapshot so a window listed here was
         // on screen no earlier than the snapshot that may have omitted it.
         let onscreen_snapshot = self.backend.onscreen_window_frames();
@@ -543,7 +550,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         for (window, target) in &routes {
             if !affinity_policy.visible_workspaces.contains(target) {
                 let target_output = output_for(&self.workspaces, *target, outputs);
-                match self.park_window(window, target_output, outputs) {
+                let outcome = if output == target_output {
+                    self.park_window(window, target_output, outputs)
+                } else {
+                    self.park_window_across(window, output, target_output, outputs)
+                };
+                match outcome {
                     macos::ApplyOutcome::Applied => {}
                     macos::ApplyOutcome::Gone => {
                         self.forget_window(workspace, window);
@@ -551,6 +563,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     }
                     _ => {
                         *failed += 1;
+                        self.forget_window(workspace, window);
                         continue;
                     }
                 }

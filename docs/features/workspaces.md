@@ -50,9 +50,12 @@ Focus follows                                              // ws.focus-follow
 
 Where a new window goes (first match wins)                 // ws.adoption
 ├── ignore rule        -> never managed
-├── route rule         -> that workspace (parked if hidden); bundle-only route rules apply to the
-│                         app's initial window while secondary windows stay on the active workspace
-├── float rule / dialog / non-resizable -> floating on the workspace where first seen
+├── route rule         -> that workspace (parked if hidden; non-resizable windows stay floating on
+│                         that workspace); bundle-only route rules apply to all windows present on
+│                         the app's first observation while secondary windows opened later stay on
+│                         the active workspace
+├── float rule / dialog / non-resizable (without a route rule) -> floating on the workspace where
+│                         first seen
 ├── remembered placement (startup window, first 60 s, or the app relaunched within 30 s of
 │   quitting) -> remembered workspace
 └── otherwise          -> active workspace of the display under the window's center
@@ -183,7 +186,12 @@ on the same letter.
   `changing_route_rule_to_named_workspace_enables_it_and_moves_open_window`,
   `removing_or_rerouting_float_rule_applies_live_on_visible_and_hidden_workspaces`,
   `floating_hidden_parked_tile_preserves_recovery_frame`,
-  `non_resizable_window_stays_floating_on_current_workspace_when_route_rule_added`,
+  `non_resizable_window_routes_floating_when_route_rule_added`,
+  `non_resizable_window_routes_floating_on_adoption_and_cross_display`,
+  `startup_with_restored_workspace_state_applies_rules_to_already_open_windows`,
+  `startup_routes_all_initially_open_windows_of_ruled_app_even_with_leading_non_resizable`,
+  `cross_display_initial_route_parks_on_source_display_and_retries_after_failure`,
+  `reassigning_workspace_display_via_config_relocates_recovery_frames_and_parks_safely`,
   `unrelated_rule_reload_preserves_manually_moved_windows`,
   `ignoring_a_hidden_parked_window_restores_and_releases_it`,
   `rule_reload_retries_only_failed_or_unavailable_windows`).
@@ -246,7 +254,7 @@ on the same letter.
   logs `hotkey: <name> pressed but macOS did not deliver it`, registers every shortcut again (at
   most every 5 s) and runs the missed action. Each delivered press logs `hotkey: <name>`.
 - Config edits (rules, display assignments, named-workspace shortcuts, and HUD settings) reload
-  automatically without restarting; Settings › Rules and Layout retile immediately, and
+  automatically without restarting; Settings › Rules, Workspaces, and Layout retile immediately, and
   `ctl restart` exits without relaunching.
 - The HUD's first appearance after launch only fades in: its panel has drawn nothing yet for the
   capsule to rise from. Every later one enters with the full motion.

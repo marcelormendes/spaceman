@@ -65,9 +65,11 @@ Focus follows                                              // ws.focus-follow
 
 Where a new window goes (first match wins)                 // ws.adoption
 ├── ignore rule        -> never managed
-├── route rule         -> that workspace (parked if hidden); bundle-only route rules apply to the
-│                         app's initial window while secondary windows stay on the active workspace
-├── float rule / dialog / non-resizable -> floating on the workspace where first seen
+├── route rule         -> that workspace (parked if hidden; non-resizable windows stay floating on
+│                         that workspace); bundle-only route rules apply to all windows present on
+│                         the app's first observation while secondary windows opened later stay on
+│                         the active workspace
+├── float rule / dialog / non-resizable (without a route rule) -> floating on the workspace where first seen
 ├── remembered placement (startup window, first 60 s, or the app relaunched within 30 s of
 │   quitting) -> remembered workspace
 └── otherwise          -> active workspace of the display under the window's center

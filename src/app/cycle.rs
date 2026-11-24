@@ -2,6 +2,7 @@ mod affinity;
 mod omission;
 mod readback;
 mod rule_reload;
+pub(super) use affinity::PendingInitialRoute;
 pub(super) use omission::Omission;
 #[cfg(test)]
 pub(super) use readback::ASYNC_BOUNCE_SETTLE;
@@ -186,6 +187,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             cancelled,
             failed: &mut failed,
         });
+        self.retry_pending_initial_routes(
+            &visible,
+            &outputs,
+            (focused.as_ref(), frontmost.as_ref()),
+            &mut failed,
+        );
         let affinity_policy =
             self.freeze_window_affinities(&observation, &visible, server_frames)?;
         self.apply_floating_routes(

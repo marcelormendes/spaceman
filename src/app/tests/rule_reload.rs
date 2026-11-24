@@ -799,10 +799,13 @@ fn cross_display_initial_route_parks_on_source_display_and_retries_after_failure
     // Secondary display is on workspace 7, so workspace 6 is hidden on Secondary.
     runtime.workspaces.switch(seven);
 
-    // Cycle 1: transient park failure must not strand Notes on workspace 1.
+    // Cycle 1: transient park failure rolls back to workspace 1 and queues a bounded retry.
     let status = runtime.cycle(outputs(), &cancelled).unwrap();
     assert_eq!(status.failed, 1);
-    assert_eq!(runtime.workspaces.workspace_of(&notes), None);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&notes),
+        Some(WorkspaceId::ONE)
+    );
 
     // Cycle 2: parking succeeds on Main's edge even when Secondary-edge writes are clamped,
     // translates the recovery frame to Secondary, and populates workspace 6 in Secondary's menu.
@@ -834,12 +837,12 @@ fn cross_display_initial_route_parks_on_source_display_and_retries_after_failure
 fn exhausted_initial_route_falls_back_to_current_display_and_failed_restore_rolls_back_recovery() {
     let cancelled = AtomicBool::new(false);
 
-    // Part A: a permanently unparkable single-window initial route falls back to workspace 1
-    // after 3 attempts instead of looping forever.
+    // Part A: a permanently unparkable single-window initial route stays on workspace 1
+    // and stops retrying after 3 attempts instead of looping forever.
     let stuck = window(10);
     let mut backend = FakeBackend {
         observation: Some(observation_for("com.example.Stuck", &stuck, frame(50))),
-        position_outcome: Some(macos::ApplyOutcome::Unavailable),
+        refuses_position: Some(|target| target.x < 0 || target.x >= 1000),
         ..FakeBackend::default()
     };
     backend.frames.insert(stuck.clone(), frame(50));
@@ -851,10 +854,14 @@ fn exhausted_initial_route_falls_back_to_current_display_and_failed_restore_roll
     for _ in 0..3 {
         let status = runtime.cycle(outputs(), &cancelled).unwrap();
         assert_eq!(status.failed, 1);
-        assert_eq!(runtime.workspaces.workspace_of(&stuck), None);
+        assert_eq!(
+            runtime.workspaces.workspace_of(&stuck),
+            Some(WorkspaceId::ONE)
+        );
     }
     let status = runtime.cycle(outputs(), &cancelled).unwrap();
     assert_eq!(status.failed, 0);
+    assert!(runtime.pending_initial_routes.is_empty());
     assert_eq!(
         runtime.workspaces.workspace_of(&stuck),
         Some(WorkspaceId::ONE)

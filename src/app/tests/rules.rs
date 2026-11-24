@@ -678,7 +678,10 @@ fn failed_cross_display_floating_carry_retries_on_adoption_and_rule_reload() {
 
     let status = runtime.cycle(outputs(), &cancelled).unwrap();
     assert_eq!(status.failed, 1);
-    assert_eq!(runtime.workspaces.floating_workspace_of(&settings), None);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::ONE)
+    );
 
     runtime.backend.position_outcome = None;
     let status = runtime.cycle(outputs(), &cancelled).unwrap();
@@ -922,7 +925,10 @@ fn failed_sibling_initial_route_retries_even_after_first_sibling_succeeds() {
         runtime.workspaces.workspace_of(&first),
         Some(WorkspaceId::TWO)
     );
-    assert_eq!(runtime.workspaces.workspace_of(&second), None);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&second),
+        Some(WorkspaceId::ONE)
+    );
 
     // Cycle 2: retry still routes the second sibling to workspace 2 instead of stranding it on 1.
     runtime.backend.refuses_position = None;

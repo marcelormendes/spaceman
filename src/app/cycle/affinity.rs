@@ -6,6 +6,13 @@ use crate::journal::PlacementSource;
 const MAX_INITIAL_ROUTE_ATTEMPTS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PendingInitialRoute {
+    pub(super) source: WorkspaceId,
+    pub(super) target: WorkspaceId,
+    pub(super) attempts: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FrozenWindowAffinity {
     Owned(WorkspaceId),
     PendingReplacement(WorkspaceId),
@@ -61,8 +68,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.note_absent_departures(observation);
         let workspaces = &self.workspaces;
         let backend = &mut self.backend;
-        self.pending_initial_routes.retain(|window, _| {
-            workspaces.workspace_of_any(window).is_none() && backend.is_process_running(&window.app)
+        self.pending_initial_routes.retain(|window, route| {
+            workspaces.workspace_of_any(window) == Some(route.source)
+                && backend.is_process_running(&window.app)
         });
         let mut affinities = HashMap::new();
         let mut floating_routes = Vec::new();
@@ -113,15 +121,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 } else if self.workspaces.floating_workspace_of(&window.id).is_some() {
                     self.workspaces.forget_floating(&window.id);
                 }
-                let route_attempts = self.pending_initial_routes.get(&window.id).copied();
-                let route_exhausted =
-                    route_attempts.is_some_and(|attempts| attempts >= MAX_INITIAL_ROUTE_ATTEMPTS);
-                let route_pending =
-                    route_attempts.is_some_and(|attempts| attempts < MAX_INITIAL_ROUTE_ATTEMPTS);
-                let should_route = !route_exhausted
-                    && (!app_owns_window
-                        || route_pending
-                        || self.config.route_matches_title(&app.bundle_id, window));
+                let should_route =
+                    !app_owns_window || self.config.route_matches_title(&app.bundle_id, window);
                 let affinity = if let Some(owner) = self.workspaces.workspace_of(&window.id) {
                     FrozenWindowAffinity::Owned(owner)
                 } else if !floating
@@ -216,8 +217,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     /// Routes newly observed non-resizable windows that matched a `route` rule
     /// to their target workspace while keeping them floating (never tiled).
-    /// Defers ownership until any required cross-display carry or parking
-    /// succeeds so transient failures retry cleanly on the next cycle.
+    /// Keeps ownership on the source workspace on transient failure and queues
+    /// a bounded retry so no parked recovery entry is ever left unowned.
     pub(super) fn apply_floating_routes(
         &mut self,
         routes: &[(crate::PhysicalWindowId, WorkspaceId, crate::Rect)],
@@ -233,10 +234,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let visible_workspaces: HashSet<_> =
             visible.iter().map(|resolved| resolved.workspace).collect();
         for (window, target, frame) in routes {
-            let source_output = visible
+            let source_resolved = visible
                 .iter()
-                .find(|resolved| resolved.output.contains_center(*frame))
-                .map(|resolved| resolved.output);
+                .find(|resolved| resolved.output.contains_center(*frame));
+            let source_workspace = source_resolved.map(|resolved| resolved.workspace);
+            let source_output = source_resolved.map(|resolved| resolved.output);
             let target_output = output_for(&self.workspaces, *target, outputs);
             if visible_workspaces.contains(target) {
                 if let Some(source_output) = source_output
@@ -244,7 +246,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     && !self.carry_floating_window(window, source_output, target_output)
                 {
                     *failed += 1;
-                    self.record_initial_route_retry(window);
+                    if let Some(source) = source_workspace {
+                        self.workspaces.own_floating(window.clone(), source);
+                        self.record_initial_route_retry(window, source, *target);
+                    }
                     continue;
                 }
                 log_event!("route floating {:?} -> workspace {}", window, target);
@@ -275,7 +280,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     }
                     _ => {
                         *failed += 1;
-                        self.record_initial_route_retry(window);
+                        if let Some(source) = source_workspace {
+                            self.workspaces.own_floating(window.clone(), source);
+                            self.record_initial_route_retry(window, source, *target);
+                        }
                     }
                 }
             }
@@ -283,8 +291,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     }
 
     /// Moves newly inserted tiled windows to their routed target workspaces,
-    /// parking across displays when needed and dropping the temporary slot on
-    /// transient park failure so the next cycle retries instead of stranding.
+    /// parking across displays when needed. On transient park failure, leaves
+    /// the window owned on its source workspace and queues a bounded retry.
     pub(super) fn apply_inserted_routes(
         &mut self,
         resolved: &ResolvedWorkspace,
@@ -317,8 +325,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     }
                     _ => {
                         *failed += 1;
-                        self.forget_window(workspace, window);
-                        self.record_initial_route_retry(window);
+                        self.record_initial_route_retry(window, workspace, *target);
                         continue;
                     }
                 }
@@ -332,12 +339,162 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         routed_targets
     }
 
-    fn record_initial_route_retry(&mut self, window: &crate::PhysicalWindowId) {
-        let attempts = self
+    /// Retries initial routes that failed transiently while keeping the window
+    /// safely owned on its source workspace between attempts.
+    pub(super) fn retry_pending_initial_routes(
+        &mut self,
+        visible: &[ResolvedWorkspace],
+        outputs: &macos::DisplayOutputs,
+        focus: (Option<&crate::PhysicalWindowId>, Option<&AppInstanceId>),
+        failed: &mut usize,
+    ) {
+        if self.pending_initial_routes.is_empty() {
+            return;
+        }
+        let (focused, frontmost) = focus;
+        let visible_workspaces: HashSet<_> =
+            visible.iter().map(|resolved| resolved.workspace).collect();
+        let mut pending: Vec<_> = self
             .pending_initial_routes
-            .entry(window.clone())
-            .or_insert(0);
-        *attempts = attempts.saturating_add(1).min(MAX_INITIAL_ROUTE_ATTEMPTS);
+            .iter()
+            .map(|(window, route)| (window.clone(), *route))
+            .collect();
+        pending.sort_by_key(|(window, _)| (window.app.pid, window.window_id));
+        let mut moved = false;
+        for (window, route) in pending {
+            if route.attempts >= MAX_INITIAL_ROUTE_ATTEMPTS {
+                self.pending_initial_routes.remove(&window);
+                continue;
+            }
+            let is_floating = if self.workspaces.workspace_of(&window) == Some(route.source) {
+                false
+            } else if self.workspaces.floating_workspace_of(&window) == Some(route.source) {
+                true
+            } else {
+                self.pending_initial_routes.remove(&window);
+                continue;
+            };
+            if route.source == route.target
+                || !self
+                    .scope
+                    .manages_selector(self.workspaces.assignment(route.target))
+            {
+                self.pending_initial_routes.remove(&window);
+                continue;
+            }
+            if !visible_workspaces.contains(&route.source) {
+                continue;
+            }
+            let source_output = output_for(&self.workspaces, route.source, outputs);
+            let target_output = output_for(&self.workspaces, route.target, outputs);
+            let target_visible = visible_workspaces.contains(&route.target);
+            if is_floating {
+                if target_visible {
+                    if source_output != target_output
+                        && !self.carry_floating_window(&window, source_output, target_output)
+                    {
+                        *failed += 1;
+                        self.advance_initial_route_retry(&window);
+                        continue;
+                    }
+                    log_event!("route floating {:?} -> workspace {}", window, route.target);
+                    self.pending_initial_routes.remove(&window);
+                    self.workspaces.own_floating(window.clone(), route.target);
+                    self.note_placement(&window, PlacementSource::Rule, route.target);
+                    moved = true;
+                } else {
+                    let outcome = if source_output == target_output {
+                        self.park_window(&window, target_output, outputs)
+                    } else {
+                        self.park_window_across(&window, source_output, target_output, outputs)
+                    };
+                    match outcome {
+                        macos::ApplyOutcome::Applied => {
+                            log_event!(
+                                "route floating {:?} -> workspace {} (parked)",
+                                window,
+                                route.target
+                            );
+                            self.pending_initial_routes.remove(&window);
+                            self.suppress_parked_focus(&window, focused, frontmost);
+                            self.workspaces.own_floating(window.clone(), route.target);
+                            self.note_placement(&window, PlacementSource::Rule, route.target);
+                            moved = true;
+                        }
+                        macos::ApplyOutcome::Gone => {
+                            self.pending_initial_routes.remove(&window);
+                            self.workspaces.forget_floating(&window);
+                        }
+                        _ => {
+                            *failed += 1;
+                            self.advance_initial_route_retry(&window);
+                        }
+                    }
+                }
+            } else {
+                if !target_visible {
+                    let outcome = if source_output == target_output {
+                        self.park_window(&window, target_output, outputs)
+                    } else {
+                        self.park_window_across(&window, source_output, target_output, outputs)
+                    };
+                    match outcome {
+                        macos::ApplyOutcome::Applied => {
+                            self.suppress_parked_focus(&window, focused, frontmost);
+                        }
+                        macos::ApplyOutcome::Gone => {
+                            self.pending_initial_routes.remove(&window);
+                            self.forget_window(route.source, &window);
+                            continue;
+                        }
+                        _ => {
+                            *failed += 1;
+                            self.advance_initial_route_retry(&window);
+                            continue;
+                        }
+                    }
+                }
+                self.pending_initial_routes.remove(&window);
+                if self.workspaces.move_window(&window, route.target).is_some() {
+                    self.clear_relocation_evidence(route.source, route.target, &window);
+                    self.clear_fullscreen_restore_if_inactive(route.source);
+                    self.exit_fullscreen_if_split(route.target);
+                    self.clear_fullscreen_restore_if_inactive(route.target);
+                    self.note_placement(&window, PlacementSource::Rule, route.target);
+                    moved = true;
+                }
+            }
+        }
+        if moved && let Err(error) = self.persist_workspace_state_if_changed() {
+            log_event!("failed to persist retried initial routes: {error}");
+        }
+    }
+
+    fn record_initial_route_retry(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        source: WorkspaceId,
+        target: WorkspaceId,
+    ) {
+        self.pending_initial_routes.insert(
+            window.clone(),
+            PendingInitialRoute {
+                source,
+                target,
+                attempts: 1,
+            },
+        );
+    }
+
+    fn advance_initial_route_retry(&mut self, window: &crate::PhysicalWindowId) {
+        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+            self.pending_initial_routes.entry(window.clone())
+        {
+            entry.get_mut().attempts = entry.get().attempts.saturating_add(1);
+            if entry.get().attempts >= MAX_INITIAL_ROUTE_ATTEMPTS {
+                entry.remove();
+            }
+        }
     }
 
     /// Hidden workspaces are not reconciled, so an app that quit while its

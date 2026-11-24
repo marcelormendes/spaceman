@@ -113,6 +113,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 } else if self.workspaces.floating_workspace_of(&window.id).is_some() {
                     self.workspaces.forget_floating(&window.id);
                 }
+                let route_attempts = self.pending_initial_routes.get(&window.id).copied();
+                let route_exhausted =
+                    route_attempts.is_some_and(|attempts| attempts >= MAX_INITIAL_ROUTE_ATTEMPTS);
+                let route_pending =
+                    route_attempts.is_some_and(|attempts| attempts < MAX_INITIAL_ROUTE_ATTEMPTS);
+                let should_route = !route_exhausted
+                    && (!app_owns_window
+                        || route_pending
+                        || self.config.route_matches_title(&app.bundle_id, window));
                 let affinity = if let Some(owner) = self.workspaces.workspace_of(&window.id) {
                     FrozenWindowAffinity::Owned(owner)
                 } else if !floating
@@ -132,9 +141,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     FrozenWindowAffinity::Floating
                 } else if floating
                     && let WindowDisposition::Route(target) = disposition
-                    && (!app_owns_window
-                        || self.pending_initial_routes.contains_key(&window.id)
-                        || self.config.route_matches_title(&app.bundle_id, window))
+                    && should_route
                 {
                     if !self
                         .scope
@@ -183,10 +190,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                                     target
                                 ));
                             }
-                            if !app_owns_window
-                                || self.pending_initial_routes.contains_key(&window.id)
-                                || self.config.route_matches_title(&app.bundle_id, window)
-                            {
+                            if should_route {
                                 FrozenWindowAffinity::ExplicitRoute(target)
                             } else {
                                 FrozenWindowAffinity::CurrentDisplay
@@ -333,10 +337,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .pending_initial_routes
             .entry(window.clone())
             .or_insert(0);
-        *attempts = attempts.saturating_add(1);
-        if *attempts >= MAX_INITIAL_ROUTE_ATTEMPTS {
-            self.pending_initial_routes.remove(window);
-        }
+        *attempts = attempts.saturating_add(1).min(MAX_INITIAL_ROUTE_ATTEMPTS);
     }
 
     /// Hidden workspaces are not reconciled, so an app that quit while its

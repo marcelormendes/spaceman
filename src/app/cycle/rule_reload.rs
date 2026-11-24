@@ -390,7 +390,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let source_output = output_for(&self.workspaces, source, pass.outputs);
         let target_output = output_for(&self.workspaces, target, pass.outputs);
         let was_parked = self.parked.contains_key(window);
-        if !was_parked || source_output != target_output {
+        if !was_parked {
             let outcome = if source_output == target_output {
                 self.park_window(window, target_output, pass.outputs)
             } else {
@@ -408,8 +408,25 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     return;
                 }
             }
-            if !was_parked {
-                self.suppress_parked_focus(window, pass.focused, pass.frontmost);
+            self.suppress_parked_focus(window, pass.focused, pass.frontmost);
+        } else if source_output != target_output
+            && let Some(original) = self.parked.get(window).copied()
+            && !target_output.contains_center(original)
+        {
+            let from_output = pass
+                .outputs
+                .frames()
+                .find(|display| display.contains_center(original))
+                .unwrap_or(source_output);
+            let relocated = crate::app::move_workspace::translate_frame_to_output(
+                original,
+                from_output,
+                target_output,
+            );
+            if !self.record_recovery(window, relocated) {
+                *pass.failed += 1;
+                pass.retry_windows.insert(window.clone());
+                return;
             }
         }
         self.transfer_for_rule(window, target, was_tiled, stay_floating);
@@ -436,6 +453,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let target_output = output_for(&self.workspaces, target, pass.outputs);
         let was_parked = self.parked.contains_key(window);
         if was_parked {
+            let mut relocated_from = None;
             if source_output != target_output
                 && let Some(original) = self.parked.get(window).copied()
                 && !target_output.contains_center(original)
@@ -455,6 +473,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     pass.retry_windows.insert(window.clone());
                     return;
                 }
+                relocated_from = Some(original);
             }
             match self.restore_window(window) {
                 macos::ApplyOutcome::Applied => {}
@@ -463,6 +482,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     return;
                 }
                 _ => {
+                    if let Some(original) = relocated_from
+                        && !self.record_recovery(window, original)
+                    {
+                        self.parked.insert(window.clone(), original);
+                    }
                     *pass.failed += 1;
                     pass.retry_windows.insert(window.clone());
                     return;

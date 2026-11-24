@@ -4,6 +4,10 @@
 
 use super::*;
 
+/// Bound retries for relocating a workspace after a config display change so a
+/// permanently inaccessible window or persistence error never loops forever.
+const MAX_REASSIGN_ATTEMPTS: u8 = 3;
+
 /// The displays the runtime last saw, and the hidden windows still to re-park
 /// since they changed.
 #[derive(Default)]
@@ -11,28 +15,23 @@ pub(super) struct DisplayWatch {
     known: Option<macos::DisplayOutputs>,
     repark_pending: HashSet<crate::PhysicalWindowId>,
     /// Workspaces whose display assignment changed on config reload, mapped to
-    /// the selector they moved from until the next cycle relocates their
-    /// recovery frames and floating windows.
-    reassigned: HashMap<WorkspaceId, DisplaySelector>,
+    /// their retry attempt count until their recovery frames and visible
+    /// floating windows are relocated.
+    reassigned: HashMap<WorkspaceId, u8>,
 }
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
-    /// Record that a config reload moved `workspace` off `previous`. Keeps the
-    /// earliest source selector if multiple edits arrive before the next cycle.
-    pub(super) fn note_reassigned_workspace(
-        &mut self,
-        workspace: WorkspaceId,
-        previous: DisplaySelector,
-    ) {
-        self.displays
-            .reassigned
-            .entry(workspace)
-            .or_insert(previous);
+    /// Record that a config reload changed `workspace`'s display assignment,
+    /// resetting its retry budget so the next cycle relocates its windows.
+    pub(super) fn note_reassigned_workspace(&mut self, workspace: WorkspaceId) {
+        self.displays.reassigned.insert(workspace, 0);
     }
 
     /// Translate parked recovery frames and carry visible floating windows for
     /// workspaces whose display assignment changed on config reload. Failed
-    /// updates stay queued so the next cycle retries them idempotently.
+    /// updates stay queued (up to [`MAX_REASSIGN_ATTEMPTS`]) and relocate each
+    /// window from its actual current display so retries are idempotent across
+    /// consecutive reassignments.
     pub(super) fn relocate_reassigned_workspaces(
         &mut self,
         outputs: &macos::DisplayOutputs,
@@ -45,19 +44,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let visible_workspaces: HashSet<_> =
             visible.iter().map(|resolved| resolved.workspace).collect();
         let reassigned = std::mem::take(&mut self.displays.reassigned);
-        for (workspace, old_selector) in reassigned {
-            let old_output = outputs.resolve(&old_selector).frame;
+        for (workspace, attempts) in reassigned {
             let new_output = output_for(&self.workspaces, workspace, outputs);
-            if old_output == new_output {
-                continue;
-            }
             let is_visible = visible_workspaces.contains(&workspace);
             let mut any_failed = false;
             for window in self.workspaces.windows(workspace) {
                 if let Some(original) = self.parked.get(&window).copied() {
-                    if old_output.contains_center(original) {
+                    if !new_output.contains_center(original)
+                        && let Some(from_output) = outputs
+                            .frames()
+                            .find(|display| display.contains_center(original))
+                    {
                         let relocated = super::move_workspace::translate_frame_to_output(
-                            original, old_output, new_output,
+                            original,
+                            from_output,
+                            new_output,
                         );
                         if !self.record_recovery(&window, relocated) {
                             *failed += 1;
@@ -67,21 +68,27 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 } else if is_visible
                     && self.workspaces.floating_workspace_of(&window) == Some(workspace)
                 {
-                    let still_on_old_output = self
+                    let current = self
                         .backend
                         .window_server_frame(&window)
-                        .or_else(|| self.backend.frame(&window).ok())
-                        .is_none_or(|frame| old_output.contains_center(frame));
-                    if still_on_old_output
-                        && !self.carry_floating_window(&window, old_output, new_output)
-                    {
-                        *failed += 1;
-                        any_failed = true;
+                        .or_else(|| self.backend.frame(&window).ok());
+                    if current.is_none_or(|frame| !new_output.contains_center(frame)) {
+                        let from_output = current
+                            .and_then(|frame| {
+                                outputs
+                                    .frames()
+                                    .find(|display| display.contains_center(frame))
+                            })
+                            .unwrap_or_else(|| outputs.main().frame);
+                        if !self.carry_floating_window(&window, from_output, new_output) {
+                            *failed += 1;
+                            any_failed = true;
+                        }
                     }
                 }
             }
-            if any_failed {
-                self.displays.reassigned.insert(workspace, old_selector);
+            if any_failed && attempts + 1 < MAX_REASSIGN_ATTEMPTS {
+                self.displays.reassigned.insert(workspace, attempts + 1);
             }
         }
     }

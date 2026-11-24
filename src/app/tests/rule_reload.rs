@@ -831,120 +831,76 @@ fn cross_display_initial_route_parks_on_source_display_and_retries_after_failure
 }
 
 #[test]
-fn reassigning_workspace_display_via_config_relocates_recovery_frames_and_parks_safely() {
+fn exhausted_initial_route_falls_back_to_current_display_and_failed_restore_rolls_back_recovery() {
     let cancelled = AtomicBool::new(false);
-    let seven = WorkspaceId::new(7).unwrap();
-    let to_main =
-        Config::parse("version = 1\n[[workspaces]]\nworkspace = 6\nmonitor = 'main'").unwrap();
 
-    // Part A: hidden parked windows on workspace 6 (Secondary) have their recovery frames
-    // translated onto Main when config reassigns workspace 6 to Main.
-    let settings = window(10);
-    let notes = window_for_app(2, 20);
-    let secondary_displays: Vec<_> = outputs().frames().collect();
-    let secondary_frame = outputs().secondary().unwrap().frame;
-    let settings_orig = frame(1050);
-    let notes_orig = frame(1100);
+    // Part A: a permanently unparkable single-window initial route falls back to workspace 1
+    // after 3 attempts instead of looping forever.
+    let stuck = window(10);
+    let mut backend = FakeBackend {
+        observation: Some(observation_for("com.example.Stuck", &stuck, frame(50))),
+        position_outcome: Some(macos::ApplyOutcome::Unavailable),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(stuck.clone(), frame(50));
+    let route_two = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Stuck'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, route_two);
+    for _ in 0..3 {
+        let status = runtime.cycle(outputs(), &cancelled).unwrap();
+        assert_eq!(status.failed, 1);
+        assert_eq!(runtime.workspaces.workspace_of(&stuck), None);
+    }
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&stuck),
+        Some(WorkspaceId::ONE)
+    );
+
+    // Part B: failed restore on cross-display reload rolls recovery back to the source display.
+    let parked_win = window(20);
+    let original = frame(50);
     let mut backend = FakeBackend {
         observation: Some(crate::NativeObservation {
             cycle: 0,
             mouse_down: false,
             applications: Vec::new(),
         }),
+        position_outcome: Some(macos::ApplyOutcome::Unavailable),
         ..FakeBackend::default()
     };
-    backend.frames.insert(
-        settings.clone(),
-        crate::geometry::parked_frame(secondary_frame, &secondary_displays, settings_orig),
-    );
-    backend.frames.insert(
-        notes.clone(),
-        crate::geometry::parked_frame(secondary_frame, &secondary_displays, notes_orig),
-    );
-    let mut runtime = runtime_with_parked(
+    backend
+        .frames
+        .insert(parked_win.clone(), main_parked_frame(original));
+    let route_two = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = WorkspaceRuntime::with_backend_config_state(
+        ManagementScope::Both,
         backend,
-        [
-            (settings.clone(), settings_orig),
-            (notes.clone(), notes_orig),
-        ],
+        HashMap::from([(parked_win.clone(), original)]),
+        route_two,
+        None,
     );
-    runtime.workspaces.switch(seven);
+    bind(&mut runtime, WorkspaceId::TWO, &parked_win);
     runtime
-        .workspaces
-        .own_floating(settings.clone(), WorkspaceId::SIX);
-    bind(&mut runtime, WorkspaceId::SIX, &notes);
-
-    runtime.replace_config(to_main.clone());
+        .memory
+        .bundles
+        .insert(parked_win.app.clone(), "com.example.Test".into());
+    let route_six = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    runtime.replace_config(route_six);
     let status = runtime.cycle(outputs(), &cancelled).unwrap();
-
-    assert!(
-        outputs()
-            .main()
-            .frame
-            .contains_center(runtime.parked[&settings])
+    assert_eq!(status.failed, 1);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&parked_win),
+        Some(WorkspaceId::TWO)
     );
-    assert!(
-        outputs()
-            .main()
-            .frame
-            .contains_center(runtime.parked[&notes])
-    );
-    let main_menu: Vec<_> = status.menu[0]
-        .workspaces
-        .iter()
-        .map(|entry| entry.workspace)
-        .collect();
-    let secondary_menu: Vec<_> = status.menu[1]
-        .workspaces
-        .iter()
-        .map(|entry| entry.workspace)
-        .collect();
-    assert_eq!(main_menu, vec![WorkspaceId::ONE, WorkspaceId::SIX]);
-    assert_eq!(secondary_menu, vec![seven]);
-
-    runtime
-        .switch(WorkspaceId::SIX, outputs(), &cancelled)
-        .unwrap();
-    assert!(
-        outputs()
-            .main()
-            .frame
-            .contains_center(runtime.backend.frames[&settings])
-    );
-    assert!(
-        outputs()
-            .main()
-            .frame
-            .contains_center(runtime.backend.frames[&notes])
-    );
-
-    // Part B: visible workspace 6 on Secondary moved to Main (becoming hidden on Main) parks
-    // its window off Secondary's edge (even if Main-edge writes are clamped) and translates its
-    // recovery frame to Main.
-    let visible_win = window(30);
-    let mut backend = FakeBackend {
-        observation: Some(observation(&visible_win, frame(1050))),
-        refuses_position: Some(|target| target.x < 0),
-        ..FakeBackend::default()
-    };
-    backend.frames.insert(visible_win.clone(), frame(1050));
-    let mut runtime = runtime(backend);
-    bind(&mut runtime, WorkspaceId::SIX, &visible_win);
-
-    runtime.replace_config(to_main);
-    let status = runtime.cycle(outputs(), &cancelled).unwrap();
-
-    assert_eq!(status.failed, 0);
-    assert!(
-        outputs()
-            .main()
-            .frame
-            .contains_center(runtime.parked[&visible_win])
-    );
-    let main_menu: Vec<_> = status.menu[0]
-        .workspaces
-        .iter()
-        .map(|entry| entry.workspace)
-        .collect();
-    assert_eq!(main_menu, vec![WorkspaceId::ONE, WorkspaceId::SIX]);
+    assert_eq!(runtime.parked.get(&parked_win), Some(&original));
 }

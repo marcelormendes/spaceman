@@ -161,7 +161,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         config.configure_workspaces(&mut self.workspaces);
         for (workspace, previous) in before {
             if self.workspaces.assignment(workspace) != &previous {
-                self.note_reassigned_workspace(workspace, previous);
+                self.note_reassigned_workspace(workspace);
             }
         }
         let previous = std::mem::replace(&mut self.config, config);

@@ -191,10 +191,11 @@ on the same letter.
   `startup_with_restored_workspace_state_applies_rules_to_already_open_windows`,
   `startup_routes_all_initially_open_windows_of_ruled_app_even_with_leading_non_resizable`,
   `cross_display_initial_route_parks_on_source_display_and_retries_after_failure`,
-  `reassigning_workspace_display_via_config_relocates_recovery_frames_and_parks_safely`,
+  `exhausted_initial_route_falls_back_to_current_display_and_failed_restore_rolls_back_recovery`,
   `unrelated_rule_reload_preserves_manually_moved_windows`,
   `ignoring_a_hidden_parked_window_restores_and_releases_it`,
-  `rule_reload_retries_only_failed_or_unavailable_windows`).
+  `rule_reload_retries_only_failed_or_unavailable_windows`), `src/app/tests/cross_display.rs`
+  (`reassigning_workspace_display_via_config_relocates_recovery_frames_and_parks_safely`).
 - Unit (FakeBackend), `src/app/tests/rules.rs` & `src/app/tests/reconciliation.rs`: adoption order
   (`bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace`,
   `title_route_rule_routes_matching_secondary_window`,

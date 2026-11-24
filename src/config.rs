@@ -323,6 +323,19 @@ impl Config {
         })
     }
 
+    /// True when any rule that can match `bundle_id` inspects the window title.
+    #[must_use]
+    pub fn has_title_rule_for(&self, bundle_id: &str) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.matcher.title.is_some()
+                && rule
+                    .matcher
+                    .bundle_id
+                    .as_deref()
+                    .is_none_or(|value| value == bundle_id)
+        })
+    }
+
     #[must_use]
     pub fn has_bundle_route(&self, bundle_id: &str) -> bool {
         self.rules
@@ -629,6 +642,8 @@ workspace = 7
             config.disposition("com.example.App", &window(Some("Document"))),
             WindowDisposition::Route(WorkspaceId::new(7).unwrap())
         );
+        assert!(config.has_title_rule_for("com.example.App"));
+        assert!(!config.has_title_rule_for("com.example.Other"));
     }
 
     #[test]

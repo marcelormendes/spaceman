@@ -180,7 +180,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             focused: focused.as_ref(),
             cancelled,
             failed: &mut failed,
-        })?;
+        });
         let affinity_policy =
             self.freeze_window_affinities(&observation, &visible, server_frames)?;
         // Taken after the Accessibility snapshot so a window listed here was

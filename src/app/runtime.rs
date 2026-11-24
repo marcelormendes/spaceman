@@ -153,8 +153,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     pub(super) fn replace_config(&mut self, config: Config) {
         config.configure_workspaces(&mut self.workspaces);
         let previous = std::mem::replace(&mut self.config, config);
-        self.pending_rule_reload
-            .get_or_insert(cycle::PendingRuleReload::new(previous));
+        match &mut self.pending_rule_reload {
+            Some(pending) => pending.reset_for_new_reload(),
+            None => self.pending_rule_reload = Some(cycle::PendingRuleReload::new(previous)),
+        }
     }
 
     pub(super) fn execute(

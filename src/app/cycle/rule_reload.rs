@@ -7,6 +7,10 @@ const MAX_RELOAD_ATTEMPTS: u8 = 3;
 pub(super) struct PendingRuleReload {
     previous: Config,
     attempts: u8,
+    /// When retrying after a partial failure or unavailable observation, only
+    /// revisit the windows that did not finish so manually moved windows are
+    /// never re-routed.
+    only_windows: Option<HashSet<crate::PhysicalWindowId>>,
 }
 
 impl PendingRuleReload {
@@ -14,7 +18,19 @@ impl PendingRuleReload {
         Self {
             previous,
             attempts: 0,
+            only_windows: None,
         }
+    }
+
+    pub(super) fn reset_for_new_reload(&mut self) {
+        self.attempts = 0;
+        self.only_windows = None;
+    }
+
+    fn includes(&self, window: &crate::PhysicalWindowId) -> bool {
+        self.only_windows
+            .as_ref()
+            .is_none_or(|windows| windows.contains(window))
     }
 }
 
@@ -37,8 +53,7 @@ struct ReloadPass<'a> {
     failed: &'a mut usize,
     relayout: HashSet<WorkspaceId>,
     restored_apps: HashSet<AppInstanceId>,
-    retry_needed: bool,
-    first_error: Option<String>,
+    retry_windows: HashSet<crate::PhysicalWindowId>,
 }
 
 struct ObservedIndex {
@@ -55,14 +70,11 @@ struct OwnedWindow {
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// Applies pending config-reload rule changes to open windows (visible and
-    /// hidden), preserving retry state on transient failures or incomplete
+    /// hidden), retrying only windows that hit transient failures or incomplete
     /// observations.
-    pub(super) fn apply_pending_rule_reload(
-        &mut self,
-        context: RuleReloadContext<'_>,
-    ) -> Result<(), String> {
+    pub(super) fn apply_pending_rule_reload(&mut self, context: RuleReloadContext<'_>) {
         let Some(mut pending) = self.pending_rule_reload.take() else {
-            return Ok(());
+            return;
         };
         let RuleReloadContext {
             outputs,
@@ -85,25 +97,26 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             failed,
             relayout: HashSet::new(),
             restored_apps: HashSet::new(),
-            retry_needed: false,
-            first_error: None,
+            retry_windows: HashSet::new(),
         };
 
         for entry in owned {
+            if !pending.includes(&entry.window) {
+                continue;
+            }
             if index.unavailable_apps.contains(&entry.window.app) {
-                pass.retry_needed = true;
+                pass.retry_windows.insert(entry.window);
                 continue;
             }
             self.apply_owned_rule_change(&pending.previous, entry, &index, &mut pass);
         }
 
-        self.route_unowned_windows(&pending.previous, index.unowned, &mut pass);
+        self.route_unowned_windows(&pending, index.unowned, &mut pass);
 
         let ReloadPass {
             relayout,
             restored_apps,
-            retry_needed,
-            first_error,
+            retry_windows,
             failed,
             ..
         } = pass;
@@ -120,13 +133,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         mark_restored_apps_unavailable(observation, restored_apps);
 
-        if retry_needed && pending.attempts + 1 < MAX_RELOAD_ATTEMPTS {
-            pending.attempts += 1;
-            self.pending_rule_reload = Some(pending);
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+        if !retry_windows.is_empty() {
+            if pending.attempts + 1 < MAX_RELOAD_ATTEMPTS {
+                pending.attempts += 1;
+                pending.only_windows = Some(retry_windows);
+                self.pending_rule_reload = Some(pending);
+            } else {
+                let mut left: Vec<_> = retry_windows.into_iter().collect();
+                left.sort_by_key(|window| (window.app.pid, window.window_id));
+                log_event!(
+                    "rule reload: gave up after {} attempt(s); {} window(s) unchanged: {:?}",
+                    MAX_RELOAD_ATTEMPTS,
+                    left.len(),
+                    left
+                );
+            }
         }
     }
 
@@ -203,7 +224,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             was_tiled,
         } = entry;
         let Some((bundle_id, probe_window, observed_resizable)) =
-            self.probe_owned_window(&window, index)
+            self.probe_owned_window(&window, previous, index)
         else {
             return;
         };
@@ -222,7 +243,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     )
                 {
                     *pass.failed += 1;
-                    pass.retry_needed = true;
+                    pass.retry_windows.insert(window);
                     return;
                 }
                 log_event!(
@@ -235,7 +256,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             WindowDisposition::Floating => {
                 if was_tiled {
                     log_event!("rule reload: float {:?} on workspace {}", window, source);
-                    self.forget_window(source, &window);
+                    // Detach from the tiled layout while preserving parking
+                    // recovery state for hidden windows.
+                    self.workspaces.forget_window(source, &window);
+                    self.clear_fullscreen_restore_if_inactive(source);
+                    self.clear_relocation_evidence(source, source, &window);
                     self.workspaces.own_floating(window, source);
                 }
             }
@@ -249,7 +274,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
             WindowDisposition::Route(target) => {
                 if let Err(error) = self.ensure_managed_workspace(target) {
-                    pass.first_error.get_or_insert(error);
+                    log_event!("rule reload: skipped {:?}: {error}", window);
+                    return;
+                }
+                if !was_tiled && observed_resizable == Some(false) {
+                    // Movable non-resizable windows remain floating on the
+                    // workspace where they were first observed.
                     return;
                 }
                 if old_disp == WindowDisposition::Floating {
@@ -257,7 +287,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
                 let stay_floating = !was_tiled
                     && (self.manual_floating.contains(&window)
-                        || observed_resizable == Some(false)
                         || (observed_resizable.is_none()
                             && old_disp != WindowDisposition::Floating));
                 if source == target {
@@ -292,6 +321,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     fn probe_owned_window(
         &mut self,
         window: &crate::PhysicalWindowId,
+        previous: &Config,
         index: &ObservedIndex,
     ) -> Option<(String, crate::ObservedWindow, Option<bool>)> {
         if let Some((bundle_id, observed)) = index.windows.get(window) {
@@ -302,6 +332,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             ));
         }
         let bundle_id = self.resolve_bundle_id(&window.app)?;
+        // Unobserved (parked) windows have no title in memory; only evaluate
+        // them when neither config has a title rule for this bundle.
+        if previous.has_title_rule_for(&bundle_id) || self.config.has_title_rule_for(&bundle_id) {
+            return None;
+        }
         let synthetic = crate::ObservedWindow {
             id: window.clone(),
             frame: crate::Rect::default(),
@@ -337,7 +372,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     ) {
         let source_output = output_for(&self.workspaces, source, pass.outputs);
         let target_output = output_for(&self.workspaces, target, pass.outputs);
-        if !self.parked.contains_key(window) {
+        let was_parked = self.parked.contains_key(window);
+        if !was_parked || source_output != target_output {
             let outcome = if source_output == target_output {
                 self.park_window(window, target_output, pass.outputs)
             } else {
@@ -351,27 +387,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
                 _ => {
                     *pass.failed += 1;
-                    pass.retry_needed = true;
+                    pass.retry_windows.insert(window.clone());
                     return;
                 }
             }
-            if pass.focused == Some(window) || pass.frontmost == Some(&window.app) {
+            if !was_parked && (pass.focused == Some(window) || pass.frontmost == Some(&window.app))
+            {
                 self.suppressed_focus = Some(window.clone());
                 self.suppressed_app = Some(window.app.clone());
-            }
-        } else if source_output != target_output
-            && let Some(original) = self.parked.get(window).copied()
-            && source_output.contains_center(original)
-        {
-            let relocated = crate::app::move_workspace::translate_frame_to_output(
-                original,
-                source_output,
-                target_output,
-            );
-            if !self.record_recovery(window, relocated) {
-                *pass.failed += 1;
-                pass.retry_needed = true;
-                return;
             }
         }
         self.transfer_for_rule(window, target, was_tiled, stay_floating);
@@ -406,7 +429,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
                 _ => {
                     *pass.failed += 1;
-                    pass.retry_needed = true;
+                    pass.retry_windows.insert(window.clone());
                     return;
                 }
             }
@@ -438,15 +461,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// rule routes them to a workspace should all move, not only the first.
     fn route_unowned_windows(
         &mut self,
-        previous: &Config,
+        pending: &PendingRuleReload,
         unowned: Vec<(String, crate::ObservedWindow)>,
         pass: &mut ReloadPass<'_>,
     ) {
         for (bundle_id, window) in unowned {
-            if !window.resizable {
+            if !window.resizable || !pending.includes(&window.id) {
                 continue;
             }
-            let old_disp = previous.disposition(&bundle_id, &window);
+            let old_disp = pending.previous.disposition(&bundle_id, &window);
             let new_disp = self.config.disposition(&bundle_id, &window);
             if old_disp == new_disp {
                 continue;
@@ -455,7 +478,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 continue;
             };
             if let Err(error) = self.ensure_managed_workspace(target) {
-                pass.first_error.get_or_insert(error);
+                log_event!("rule reload: skipped {:?}: {error}", window.id);
                 continue;
             }
             let target_output = output_for(&self.workspaces, target, pass.outputs);
@@ -474,7 +497,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 };
                 if !matches!(parked, macos::ApplyOutcome::Applied) {
                     *pass.failed += 1;
-                    pass.retry_needed = true;
+                    pass.retry_windows.insert(window.id);
                     continue;
                 }
                 if pass.focused == Some(&window.id) || pass.frontmost == Some(&window.id.app) {

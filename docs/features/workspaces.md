@@ -178,13 +178,15 @@ on the same letter.
   (`src/app/tests/switching.rs`) and the recognizer in `src/swipe.rs` (fires once per swipe; ignores
   short, vertical and four-finger swipes). The event tap itself (`src/macos/swipes.rs`) is not
   covered.
-- Unit (FakeBackend), `src/app/tests/rules.rs`: live rule reloads
+- Unit (FakeBackend), `src/app/tests/rule_reload.rs`: live rule reloads
   (`adding_or_changing_route_rule_moves_open_windows_live_and_populates_target_workspace`,
   `changing_route_rule_to_named_workspace_enables_it_and_moves_open_window`,
   `removing_or_rerouting_float_rule_applies_live_on_visible_and_hidden_workspaces`,
+  `floating_hidden_parked_tile_preserves_recovery_frame`,
+  `non_resizable_window_stays_floating_on_current_workspace_when_route_rule_added`,
   `unrelated_rule_reload_preserves_manually_moved_windows`,
   `ignoring_a_hidden_parked_window_restores_and_releases_it`,
-  `rule_reload_retries_after_transient_park_or_observation_failure`).
+  `rule_reload_retries_only_failed_or_unavailable_windows`).
 - Unit (FakeBackend), `src/app/tests/reconciliation.rs`: adoption order
   (`bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace`,
   `title_route_rule_routes_matching_secondary_window`,

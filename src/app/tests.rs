@@ -18,6 +18,7 @@ mod parking;
 mod reconciliation;
 mod reconnect_unsettled;
 mod reliability;
+mod rule_reload;
 mod rules;
 mod scratchpad;
 mod set_aside;
@@ -69,6 +70,10 @@ struct FakeBackend {
     /// Windows whose position writes went through the parking path.
     parked_writes: Vec<crate::PhysicalWindowId>,
     fail_persist: bool,
+    /// When set, `persist_parked` fails once `persist_count` reaches this count.
+    fail_persist_after: Option<usize>,
+    persist_count: usize,
+    bundle_ids: HashMap<AppInstanceId, String>,
     frame_outcome: Option<macos::WindowAccessError>,
     managed_outcome: Option<macos::ApplyOutcome>,
     /// Fails position writes with this outcome (an app briefly inaccessible).
@@ -142,6 +147,10 @@ impl WorkspaceBackend for FakeBackend {
         self.running_apps
             .as_ref()
             .is_none_or(|running| running.contains(app))
+    }
+
+    fn bundle_id(&mut self, app: &AppInstanceId) -> Option<String> {
+        self.bundle_ids.get(app).cloned()
     }
 
     fn apply_observed(
@@ -341,7 +350,11 @@ impl WorkspaceBackend for FakeBackend {
         parked: &HashMap<crate::PhysicalWindowId, crate::Rect>,
     ) -> Result<(), String> {
         self.calls.push(BackendCall::Persist);
-        if self.fail_persist {
+        let fail_after = self
+            .fail_persist_after
+            .is_some_and(|limit| self.persist_count >= limit);
+        self.persist_count += 1;
+        if self.fail_persist || fail_after {
             return Err("injected persistence failure".into());
         }
         self.persisted = parked.clone();

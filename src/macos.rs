@@ -330,6 +330,14 @@ pub(super) fn running_application(
     })
 }
 
+pub(crate) fn application_bundle_id(id: &AppInstanceId) -> Option<String> {
+    autoreleasepool(|_| {
+        running_application(id)?
+            .bundleIdentifier()
+            .map(|value| value.to_string())
+    })
+}
+
 pub(super) fn process_incarnation_matches(id: &AppInstanceId) -> bool {
     autoreleasepool(|_| running_application(id).is_some())
 }

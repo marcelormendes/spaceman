@@ -79,14 +79,16 @@ Rules run in file order and the first matching rule wins. An unmatched window is
   A window that refuses its tile size keeps its own size inside the tile. Toggle Float still floats
   it until toggled back.
 - `route` assigns a newly inserted resizable logical window to workspace 1 through 10 or a configured
-  named workspace A through Z. A bundle-level `route` rule (without `title`) applies to the
+  named workspace A through Z, and moves matching open resizable windows immediately when a `route`
+  rule is added or changed. A bundle-level `route` rule (without `title`) applies to the
   application's initial window while secondary windows opened later stay on the active workspace; a
   `title`-matched `route` rule routes every matching window. Movable
-  non-resizable windows remain floating on the workspace where first observed. A rule does not
-  repeatedly route existing slots, including a Ghostty native-tab physical replacement.
+  non-resizable windows remain floating on the workspace where first observed. An unchanged rule does
+  not repeatedly route existing slots (including manually moved windows or a Ghostty native-tab
+  physical replacement), and Scratchpad windows are left untouched.
 - `ignore` leaves the window entirely alone: never tiled, never owned by a workspace, never moved or
-  parked. Use it for applications that insist on positioning their own windows. A previously managed
-  window is released the next time it is observed on screen.
+  parked. Use it for applications that insist on positioning their own windows. Previously managed
+  windows (including parked ones) are restored and released when the rule reloads.
 
 During startup recovery, after a qualifying mid-session relaunch, or for an application marked to
 return, a window not matched by a `route` or `ignore` rule (including one matched by a `float` rule)
@@ -364,9 +366,10 @@ normal recovery data.
 
 ## Applying Changes
 
-Edits saved in Spaceman Settings or in an external editor take effect automatically: rule changes,
-workspace display assignments, `settings.hud`, `settings.hud_style`,
-`settings.hud_position`, `settings.mouse_follows_focus`, `settings.workspace_order`, `settings.gaps`, and
+Edits saved in Spaceman Settings or in an external editor take effect automatically: rule changes
+move, float, tile, or release matching open windows right away; workspace display assignments,
+`settings.hud`, `settings.hud_style`, `settings.hud_position`, `settings.mouse_follows_focus`,
+`settings.workspace_order`, `settings.gaps`, and
 `settings.single_window_max_width` reload without restarting (Settings › Layout retiles at once; an
 external edit applies on the next retile);
 `settings.update_channel` applies at the next update check. Global shortcuts for a

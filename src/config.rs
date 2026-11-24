@@ -475,6 +475,19 @@ impl Config {
         })
     }
 
+    /// True when any rule that can match `bundle_id` inspects the window title.
+    #[must_use]
+    pub fn has_title_rule_for(&self, bundle_id: &str) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.matcher.title.is_some()
+                && rule
+                    .matcher
+                    .bundle_id
+                    .as_deref()
+                    .is_none_or(|value| value == bundle_id)
+        })
+    }
+
     #[must_use]
     pub fn has_bundle_route(&self, bundle_id: &str) -> bool {
         self.rules

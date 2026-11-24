@@ -107,6 +107,8 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     /// The Scratchpad Lab's windows; hidden ones are parked and owned by no workspace.
     pub(super) scratchpad: crate::scratchpad::ScratchpadState,
     pub(super) config: Config,
+    /// Previous config from a live reload whose rule edits have not yet been applied.
+    pub(super) pending_rule_reload: Option<Config>,
     pub(super) foreground_lanes: HashMap<String, DisplaySelector>,
     /// Global focus history across displays: the workspace focused now and the
     /// one focused before it. `Option+Tab` reads it, so it bounces between the
@@ -146,14 +148,14 @@ impl WorkspaceRuntime<MacWorkspaceBackend> {
 }
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
-    /// Rules apply to windows from now on; named workspaces and display assignments update.
-    /// New named workspaces get their hotkeys at the next restart.
+    /// Rules apply to open and future windows; named workspaces and display assignments update.
     pub(super) fn replace_config(&mut self, config: Config) {
         if config.spacing() != self.config.spacing() {
             self.exact_spacing_workspaces.extend(WorkspaceId::all());
         }
         config.configure_workspaces(&mut self.workspaces);
-        self.config = config;
+        let previous = std::mem::replace(&mut self.config, config);
+        self.pending_rule_reload.get_or_insert(previous);
     }
 
     pub(super) fn execute(
@@ -397,6 +399,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             manual_floating,
             scratchpad: crate::scratchpad::ScratchpadState::default(),
             config,
+            pending_rule_reload: None,
             foreground_lanes: HashMap::new(),
             last_focused_workspace: None,
             previous_focused_workspace: None,

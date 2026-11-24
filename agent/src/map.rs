@@ -478,7 +478,7 @@ impl MapView<'_> {
                     move |ui: &mut Ui| {
                         let bundle_id = bundle_id.clone();
                         ui.menu = None;
-                        ui.edit(move |doc| doc.add(&bundle_id, place));
+                        ui.edit_and_retile(move |doc| doc.add(&bundle_id, place));
                     },
                 ));
             }
@@ -523,13 +523,13 @@ impl MapView<'_> {
                 let expected = rule.clone();
                 menu = menu.item(MenuItem::new("Float").on_select(move |ui: &mut Ui| {
                     ui.menu = None;
-                    ui.try_edit(|doc| doc.place_matching(&expected, Place::Float));
+                    ui.try_edit_and_retile(|doc| doc.place_matching(&expected, Place::Float));
                 }));
             }
             let expected = rule.clone();
             menu = menu.item(MenuItem::new("Remove rule").on_select(move |ui: &mut Ui| {
                 ui.menu = None;
-                ui.try_edit(|doc| doc.remove_matching(&expected));
+                ui.try_edit_and_retile(|doc| doc.remove_matching(&expected));
             }));
         }
         menu.build(self.p.k, layer)
@@ -678,7 +678,7 @@ fn drag_step(
             if unchanged {
                 ui.flush_pending_reload();
             } else {
-                ui.try_edit(|doc| doc.place_matching(&drag.snapshot, target));
+                ui.try_edit_and_retile(|doc| doc.place_matching(&drag.snapshot, target));
             }
         }
     }

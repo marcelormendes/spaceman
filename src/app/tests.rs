@@ -13,6 +13,7 @@ mod move_workspace;
 mod parking;
 mod reconciliation;
 mod reliability;
+mod rule_reload;
 mod rules;
 mod spacing;
 mod startup;

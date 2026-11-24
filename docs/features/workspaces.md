@@ -113,7 +113,7 @@ Keyboard (while tiling is enabled)
 Trackpad: three-finger swipe left/right -> next/previous workspace (turn macOS's three-finger
           "Swipe between full-screen applications" off or move it to four fingers)
 CLI: spaceman ctl switch | back-and-forth | move-workspace | move | move-app
-Config: ~/Library/Application Support/Spaceman/config.toml -> [[rules]], [[workspaces]] (edits apply when the file changes; new named-workspace shortcuts register on the next app start)
+Config: ~/Library/Application Support/Spaceman/config.toml -> [[rules]], [[workspaces]] (edits apply live when the file changes, including moving open windows for changed rules and registering shortcuts for newly referenced named workspaces)
 Menu bar: shows the active workspace glyphs; its menu lists each display's visible workspace (checked)
           and occupied ones with their apps' icons and Option shortcut -> choose one to switch
 Mouse: drop a tile on another display -> moves it to that display's active workspace (see tiling.md)
@@ -178,6 +178,15 @@ on the same letter.
   (`src/app/tests/switching.rs`) and the recognizer in `src/swipe.rs` (fires once per swipe; ignores
   short, vertical and four-finger swipes). The event tap itself (`src/macos/swipes.rs`) is not
   covered.
+- Unit (FakeBackend), `src/app/tests/rule_reload.rs`: live rule reloads
+  (`adding_or_changing_route_rule_moves_open_windows_live_and_populates_target_workspace`,
+  `changing_route_rule_to_named_workspace_enables_it_and_moves_open_window`,
+  `removing_or_rerouting_float_rule_applies_live_on_visible_and_hidden_workspaces`,
+  `floating_hidden_parked_tile_preserves_recovery_frame`,
+  `non_resizable_window_stays_floating_on_current_workspace_when_route_rule_added`,
+  `unrelated_rule_reload_preserves_manually_moved_windows`,
+  `ignoring_a_hidden_parked_window_restores_and_releases_it`,
+  `rule_reload_retries_only_failed_or_unavailable_windows`).
 - Unit (FakeBackend), `src/app/tests/reconciliation.rs`: adoption order
   (`bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace`,
   `title_route_rule_routes_matching_secondary_window`,
@@ -236,9 +245,9 @@ on the same letter.
   unknown). A listen-only key tap sees an Option shortcut Carbon didn't take; after 750 ms the agent
   logs `hotkey: <name> pressed but macOS did not deliver it`, registers every shortcut again (at
   most every 5 s) and runs the missed action. Each delivered press logs `hotkey: <name>`.
-- Config edits (rules, display assignments, and HUD settings) reload automatically before the next
-  command; new named-workspace hotkeys register on the next app start, and `ctl restart` exits
-  without relaunching.
+- Config edits (rules, display assignments, named-workspace shortcuts, and HUD settings) reload
+  automatically without restarting; Settings › Rules and Layout retile immediately, and
+  `ctl restart` exits without relaunching.
 - The HUD's first appearance after launch only fades in: its panel has drawn nothing yet for the
   capsule to rise from. Every later one enters with the full motion.
 - Try the HUD's motion without switching workspaces in the Playground (`⇧⌘D`, HUD > hud-switch):

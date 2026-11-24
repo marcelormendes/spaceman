@@ -1,10 +1,12 @@
 mod affinity;
 mod omission;
 mod readback;
+mod rule_reload;
 pub(super) use omission::Omission;
 #[cfg(test)]
 pub(super) use readback::ASYNC_BOUNCE_SETTLE;
 pub(super) use readback::{APPLY_ATTEMPT_LIMIT, AppliedFrame, record_apply_attempt};
+pub(super) use rule_reload::PendingRuleReload;
 
 use affinity::{FrozenAffinityPolicy, FrozenWindowAffinity};
 
@@ -170,6 +172,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .backend
             .snapshot(0, &outputs)
             .map_err(|error| format!("Observation error: {error}"))?;
+        self.apply_pending_rule_reload(rule_reload::RuleReloadContext {
+            outputs: &outputs,
+            visible: &visible,
+            observation: &mut observation,
+            frontmost: frontmost.as_ref(),
+            focused: focused.as_ref(),
+            cancelled,
+            failed: &mut failed,
+        });
         let affinity_policy =
             self.freeze_window_affinities(&observation, &visible, server_frames)?;
         // Taken after the Accessibility snapshot so a window listed here was

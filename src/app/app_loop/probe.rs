@@ -1,15 +1,25 @@
 use std::{
+    collections::HashSet,
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread,
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::{config::Config, login_item};
+use crate::{DisplaySelector, WorkspaceId, Workspaces, config::Config, login_item};
 
 /// How long a Launch at Login reading stays fresh. Each reading is an XPC round
 /// trip to `smd`; Spaceman's own toggle reports its result directly, so the
 /// probe only has to notice changes made in System Settings.
 const LOGIN_STATUS_TTL: Duration = Duration::from_secs(30);
+
+/// Main-thread config fields read whenever `config.toml` changes on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ProbeConfig {
+    pub(super) hud: bool,
+    /// All numbered workspaces plus config-referenced named workspaces, with
+    /// their configured display assignments.
+    pub(super) workspaces: Vec<(WorkspaceId, DisplaySelector)>,
+}
 
 /// Settings the agent polls but only the user changes. Reading them means an XPC
 /// round trip to `smd` and file-system calls, each of which can stall for a
@@ -21,8 +31,8 @@ pub(super) struct Probe {
     /// asked for. A cached value never overwrites what the toggle reported.
     pub(super) launch_at_login: Option<Result<login_item::Status, String>>,
     pub(super) config_stamp: Option<SystemTime>,
-    /// The HUD setting read for `config_stamp`, when that config loaded.
-    pub(super) hud: Option<bool>,
+    /// The config fields read for `config_stamp`, when that config loaded.
+    pub(super) config: Option<ProbeConfig>,
 }
 
 /// The probe thread's results, and a way to ask it for a fresh login status.
@@ -42,7 +52,7 @@ impl Prober {
 /// What the probe thread last read.
 #[derive(Default)]
 struct ProbeState {
-    config: Option<(Option<SystemTime>, Option<bool>)>,
+    config: Option<(Option<SystemTime>, Option<ProbeConfig>)>,
     login: Option<(Instant, Result<login_item::Status, String>)>,
 }
 
@@ -54,14 +64,14 @@ impl ProbeState {
         now: Instant,
         forced: bool,
         config_stamp: Option<SystemTime>,
-        load_hud: impl FnOnce() -> Option<bool>,
+        load_config: impl FnOnce() -> Option<ProbeConfig>,
         login_status: impl FnOnce() -> Result<login_item::Status, String>,
     ) -> Option<Probe> {
-        let (config_changed, hud) = match self.config {
-            Some((stamp, hud)) if stamp == config_stamp => (false, hud),
-            _ => (true, load_hud()),
+        let (config_changed, config) = match &self.config {
+            Some((stamp, config)) if *stamp == config_stamp => (false, config.clone()),
+            _ => (true, load_config()),
         };
-        self.config = Some((config_stamp, hud));
+        self.config = Some((config_stamp, config.clone()));
         let login_due = forced
             || self.login.as_ref().is_none_or(|(read_at, _)| {
                 now.saturating_duration_since(*read_at) >= LOGIN_STATUS_TTL
@@ -78,9 +88,26 @@ impl ProbeState {
         (config_changed || launch_at_login.is_some()).then_some(Probe {
             launch_at_login,
             config_stamp,
-            hud,
+            config,
         })
     }
+}
+
+fn read_probe_config() -> Option<ProbeConfig> {
+    let config = Config::load().ok()?;
+    let mut configured = Workspaces::default();
+    config.configure_workspaces(&mut configured);
+    let mut workspaces: Vec<_> = WorkspaceId::numbered()
+        .chain(config.named_workspaces())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|workspace| (workspace, configured.assignment(workspace).clone()))
+        .collect();
+    workspaces.sort();
+    Some(ProbeConfig {
+        hud: config.hud(),
+        workspaces,
+    })
 }
 
 /// Sends a [`Probe`] whenever one changes, checking every `interval`. The thread
@@ -98,7 +125,7 @@ pub(super) fn spawn(interval: Duration) -> Prober {
                     Instant::now(),
                     forced,
                     crate::config::modified(),
-                    || Config::load().ok().map(|config| config.hud()),
+                    read_probe_config,
                     login_item::status,
                 );
                 if let Some(probe) = probe
@@ -139,7 +166,12 @@ mod tests {
             now,
             forced,
             None,
-            || Some(true),
+            || {
+                Some(ProbeConfig {
+                    hud: true,
+                    workspaces: Vec::new(),
+                })
+            },
             || {
                 reads.set(reads.get() + 1);
                 Ok(status)
@@ -210,11 +242,23 @@ mod tests {
             start,
             false,
             stamp,
-            || Some(false),
+            || {
+                Some(ProbeConfig {
+                    hud: false,
+                    workspaces: vec![(WorkspaceId::named('M').unwrap(), DisplaySelector::Main)],
+                })
+            },
             || unreachable!("login status is still fresh"),
         );
         let probe = probe.expect("config changed");
         assert_eq!(probe.launch_at_login, None);
-        assert_eq!(probe.hud, Some(false));
+        assert_eq!(probe.config.as_ref().map(|config| config.hud), Some(false));
+        assert_eq!(
+            probe
+                .config
+                .as_ref()
+                .map(|config| config.workspaces.as_slice()),
+            Some([(WorkspaceId::named('M').unwrap(), DisplaySelector::Main)].as_slice())
+        );
     }
 }

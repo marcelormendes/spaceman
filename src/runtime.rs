@@ -156,6 +156,15 @@ impl Engine {
         true
     }
 
+    pub(crate) fn insert_bound_window(&mut self, window: PhysicalWindowId) {
+        let slot = Slot {
+            id: crate::SlotId(self.model.next_slot_id),
+            weight: 1,
+            binding: crate::BindingState::Bound(window),
+        };
+        self.insert_slot(slot);
+    }
+
     pub(crate) fn insert_slot(&mut self, mut slot: Slot) {
         if self
             .model

@@ -63,6 +63,8 @@ pub(crate) fn blank_fixture() -> Ui {
         agent: None,
         activity: activity::ActivityPane::default(),
         bridge: None,
+        #[cfg(test)]
+        sent_actions: std::cell::RefCell::new(Vec::new()),
         window: None,
         hud_driver: None,
         hud_preview: None,

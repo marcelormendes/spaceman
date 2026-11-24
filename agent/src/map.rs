@@ -471,7 +471,7 @@ impl MapView<'_> {
                     move |ui: &mut Ui| {
                         let bundle_id = bundle_id.clone();
                         ui.menu = None;
-                        ui.edit(move |doc| doc.add(&bundle_id, place));
+                        ui.edit_and_retile(move |doc| doc.add(&bundle_id, place));
                     },
                 ));
             }
@@ -513,12 +513,12 @@ impl MapView<'_> {
             if rule.place != Place::Float {
                 menu = menu.item(MenuItem::new("Float").on_select(move |ui: &mut Ui| {
                     ui.menu = None;
-                    ui.edit(|doc| doc.place(index, Place::Float));
+                    ui.edit_and_retile(|doc| doc.place(index, Place::Float));
                 }));
             }
             menu = menu.item(MenuItem::new("Remove rule").on_select(move |ui: &mut Ui| {
                 ui.menu = None;
-                ui.edit(|doc| doc.remove(index));
+                ui.edit_and_retile(|doc| doc.remove(index));
             }));
         }
         menu.build(self.p.k, layer)
@@ -639,7 +639,7 @@ fn drag(
             let unchanged = current == Some(target)
                 || (target == Place::Float && current == Some(Place::Ignore));
             if !unchanged {
-                ui.edit(|doc| doc.place(rule, target));
+                ui.edit_and_retile(|doc| doc.place(rule, target));
             }
         }
     }

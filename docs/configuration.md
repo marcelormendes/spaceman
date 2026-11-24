@@ -68,13 +68,14 @@ Rules run in file order and the first matching rule wins. An unmatched window is
 
 - `float` excludes the window from tiling and resizing, preserves its native frame, and keeps it with
   the logical workspace where it was first observed.
-- `route` assigns a resizable logical window to workspace 1 through 10 or a configured named
-  workspace A through Z. When a `route` rule is added or changed, matching open windows move to the
-  target workspace immediately. For newly opened windows afterward, a bundle-level `route` rule
-  (without `title`) applies to the application's initial window while secondary windows opened later
-  stay on the active workspace; a `title`-matched `route` rule routes every matching window. Movable
-  non-resizable windows remain floating on the workspace where first observed. An unchanged rule does
-  not repeatedly route existing slots (including manually moved windows or a Ghostty native-tab
+- `route` assigns matching windows to workspace 1 through 10 or a configured named workspace A
+  through Z. Movable non-resizable windows (such as System Settings) follow the route while
+  remaining floating rather than tiled. Rules apply on startup (including to windows restored from
+  `workspace-state.json`) and immediately when a `route` rule is added or changed. For newly opened
+  windows afterward, a bundle-level `route` rule (without `title`) applies to all windows of the
+  application present on its first observation while secondary windows opened later stay on the
+  active workspace; a `title`-matched `route` rule routes every matching window. An unchanged rule
+  does not repeatedly route existing slots (including manually moved windows or a Ghostty native-tab
   physical replacement).
 - `ignore` leaves the window entirely alone: never tiled, never owned by a workspace, never moved or
   parked. Use it for applications that insist on positioning their own windows. Previously managed
@@ -183,8 +184,8 @@ Edits saved in Spaceman Settings or in an external editor take effect automatica
 restarting: rule changes move, float, tile, or release matching open windows right away; workspace
 display assignments, named workspace shortcuts (`Option+A` ... `Option+Z`, registering added letters
 and unregistering removed empty ones), `settings.hud`, `settings.hud_style`, `settings.gaps`, and
-`settings.single_window_max_width` reload live (Settings › Rules and Layout retile at once; external
-edits apply on the next retile); `settings.update_channel` applies at the next update check. If you
+`settings.single_window_max_width` reload live (Settings › Rules, Workspaces, and Layout retile at
+once; external edits apply on the next retile); `settings.update_channel` applies at the next update
 ever want a clean restart:
 
 ```sh

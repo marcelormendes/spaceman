@@ -107,6 +107,8 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     /// Previous config from a reload whose rule changes have not yet been
     /// applied to open windows.
     pub(super) pending_rule_reload: Option<cycle::PendingRuleReload>,
+    /// Windows whose initial route failed transiently, retried up to a bound.
+    pub(super) pending_initial_routes: HashMap<crate::PhysicalWindowId, cycle::PendingInitialRoute>,
     pub(super) foreground_lanes: HashMap<String, DisplaySelector>,
     /// Global focus history across displays: the workspace focused now and the
     /// one focused before it. `Option+Tab` reads it, so it bounces between the
@@ -151,7 +153,16 @@ impl WorkspaceRuntime<MacWorkspaceBackend> {
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// Rules apply to open and future windows; named workspaces and display assignments update.
     pub(super) fn replace_config(&mut self, config: Config) {
+        let before: Vec<_> = WorkspaceId::all()
+            .map(|workspace| (workspace, self.workspaces.assignment(workspace).clone()))
+            .collect();
         config.configure_workspaces(&mut self.workspaces);
+        for (workspace, previous) in before {
+            if self.workspaces.assignment(workspace) != &previous {
+                self.note_reassigned_workspace(workspace);
+            }
+        }
+        self.pending_initial_routes.clear();
         let previous = std::mem::replace(&mut self.config, config);
         match &mut self.pending_rule_reload {
             Some(pending) => pending.advance_for_new_reload(previous),
@@ -316,6 +327,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         });
         let persisted_workspace_state = workspaces.state();
         let manual_floating = super::commands::restored_floating(&workspaces);
+        let pending_rule_reload = (restored_workspace_state && config.has_rules())
+            .then(|| cycle::PendingRuleReload::new(Config::default()));
         Self {
             backend,
             scope,
@@ -334,7 +347,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             minimum_sizes: HashMap::new(),
             manual_floating,
             config,
-            pending_rule_reload: None,
+            pending_rule_reload,
+            pending_initial_routes: HashMap::new(),
             foreground_lanes: HashMap::new(),
             last_focused_workspace: None,
             previous_focused_workspace: None,

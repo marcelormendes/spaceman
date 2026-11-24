@@ -247,18 +247,27 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 // than recording an off-screen frame as recovery data.
                 continue;
             }
-            let target = crate::geometry::parked_frame(output, &displays, frame);
-            candidates.push((workspace, window, frame, target));
+            let current_output = outputs
+                .frames()
+                .find(|display| display.contains_center(frame))
+                .unwrap_or(output);
+            let recovery = if current_output != output {
+                super::move_workspace::translate_frame_to_output(frame, current_output, output)
+            } else {
+                frame
+            };
+            let target = crate::geometry::parked_frame(current_output, &displays, frame);
+            candidates.push((workspace, window, frame, recovery, target));
         }
         if candidates.is_empty() {
             return;
         }
         self.order_back_to_front(&mut candidates, |(_, window, ..)| window.window_id);
-        for (_, window, frame, _) in &candidates {
-            self.parked.insert(window.clone(), *frame);
+        for (_, window, _, recovery, _) in &candidates {
+            self.parked.insert(window.clone(), *recovery);
         }
         if let Err(error) = self.backend.persist_parked(&self.parked) {
-            for (_, window, _, _) in &candidates {
+            for (_, window, ..) in &candidates {
                 self.parked.remove(window);
             }
             *failed += candidates.len();
@@ -267,12 +276,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
 
         let mut restored = Vec::new();
-        for (workspace, window, frame, target) in candidates {
+        for (workspace, window, frame, recovery, target) in candidates {
             log_event!(
                 "park inactive: {:?} (workspace {}) from {:?}",
                 window,
                 workspace,
-                frame
+                recovery
             );
             let mut outcome = self.backend.set_position(&window, target);
             if outcome == macos::ApplyOutcome::Gone && !self.confirm_gone(&window) {
@@ -284,15 +293,25 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
                 macos::ApplyOutcome::Gone => {
                     self.parked.remove(&window);
-                    restored.push((window.clone(), frame));
+                    restored.push((window.clone(), recovery));
                     self.forget_window(workspace, &window);
                 }
                 _ => {
                     *failed += 1;
+                    if recovery != frame {
+                        self.parked.insert(window.clone(), frame);
+                    }
                     // Only an applied or gone restore retires the entry.
                     self.restore_window_uncommitted(&window);
-                    if !self.parked.contains_key(&window) {
-                        restored.push((window, frame));
+                    match self.parked.entry(window) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            restored.push((entry.into_key(), recovery));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if recovery != frame {
+                                entry.insert(recovery);
+                            }
+                        }
                     }
                 }
             }
@@ -457,7 +476,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     /// Durably record `frame` as the window's recovery frame, replacing any
     /// earlier one; memory rolls back when persistence fails.
-    fn record_recovery(&mut self, window: &crate::PhysicalWindowId, frame: crate::Rect) -> bool {
+    pub(super) fn record_recovery(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        frame: crate::Rect,
+    ) -> bool {
         let previous = self.parked.insert(window.clone(), frame);
         if previous == Some(frame) {
             return true;

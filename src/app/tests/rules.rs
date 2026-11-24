@@ -583,3 +583,386 @@ fn unmanaged_route_is_rejected_before_insertion() {
     assert!(runtime.cycle(outputs(), &AtomicBool::new(false)).is_err());
     assert_eq!(runtime.workspaces.workspace_of(&window), None);
 }
+
+#[test]
+fn focused_window_routed_to_hidden_workspace_suppresses_focus_follow() {
+    let cancelled = AtomicBool::new(false);
+
+    // Part A: focused non-resizable window routed to hidden workspace 2 stays parked on the next
+    // cycle instead of focus-following to workspace 2.
+    let settings = window(10);
+    let mut observed = observation_for("com.apple.systempreferences", &settings, frame(50));
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        focused: Some(settings.clone()),
+        frontmost: Some(settings.app.clone()),
+        observation: Some(observed),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(settings.clone(), frame(50));
+    let config = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.apple.systempreferences'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, config);
+
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::TWO)
+    );
+    assert_eq!(runtime.suppressed_focus, Some(settings.clone()));
+    assert_eq!(runtime.suppressed_app, Some(settings.app.clone()));
+
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(runtime.parked.contains_key(&settings));
+
+    // Part B: focused resizable window routed to hidden workspace 2 also suppresses focus follow.
+    let chrome = window(20);
+    let mut backend = FakeBackend {
+        focused: Some(chrome.clone()),
+        frontmost: Some(chrome.app.clone()),
+        observation: Some(observation_for("com.google.Chrome", &chrome, frame(50))),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(chrome.clone(), frame(50));
+    let config = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.google.Chrome'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, config);
+
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.workspace_of(&chrome),
+        Some(WorkspaceId::TWO)
+    );
+    assert_eq!(runtime.suppressed_focus, Some(chrome.clone()));
+    assert_eq!(runtime.suppressed_app, Some(chrome.app.clone()));
+
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(runtime.parked.contains_key(&chrome));
+}
+
+#[test]
+fn failed_cross_display_floating_carry_retries_on_adoption_and_rule_reload() {
+    let cancelled = AtomicBool::new(false);
+
+    // Part A: adoption defers ownership when cross-display carry fails, then succeeds on retry.
+    let settings = window(10);
+    let mut observed = observation_for("com.apple.systempreferences", &settings, frame(50));
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        position_outcome: Some(macos::ApplyOutcome::Unavailable),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(settings.clone(), frame(50));
+    let route_six = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.apple.systempreferences'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, route_six.clone());
+
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 1);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::ONE)
+    );
+
+    runtime.backend.position_outcome = None;
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(runtime.backend.frames[&settings])
+    );
+
+    // Part B: live rule reload defers ownership and queues retry when cross-display carry fails.
+    let mut observed = observation_for("com.apple.systempreferences", &settings, frame(50));
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(settings.clone(), frame(50));
+    let mut runtime = super::runtime(backend);
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::ONE)
+    );
+
+    runtime.replace_config(route_six);
+    runtime.backend.position_outcome = Some(macos::ApplyOutcome::Unavailable);
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 1);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::ONE)
+    );
+
+    runtime.backend.position_outcome = None;
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(runtime.backend.frames[&settings])
+    );
+}
+
+#[test]
+fn reassigned_workspace_retries_failed_recovery_and_floating_carry_idempotently() {
+    let cancelled = AtomicBool::new(false);
+    let seven = WorkspaceId::new(7).unwrap();
+    let nine = WorkspaceId::new(9).unwrap();
+
+    // Part A: failed recovery persistence retains the reassignment and retries next cycle.
+    let notes = window(10);
+    let secondary_displays: Vec<_> = outputs().frames().collect();
+    let secondary_frame = outputs().secondary().unwrap().frame;
+    let notes_orig = frame(1100);
+    let mut backend = FakeBackend {
+        observation: Some(crate::NativeObservation {
+            cycle: 0,
+            mouse_down: false,
+            applications: Vec::new(),
+        }),
+        fail_persist: true,
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(
+        notes.clone(),
+        crate::geometry::parked_frame(secondary_frame, &secondary_displays, notes_orig),
+    );
+    let mut runtime = runtime_with_parked(backend, [(notes.clone(), notes_orig)]);
+    runtime.workspaces.switch(seven);
+    bind(&mut runtime, WorkspaceId::SIX, &notes);
+    let to_main =
+        Config::parse("version = 1\n[[workspaces]]\nworkspace = 6\nmonitor = 'main'").unwrap();
+    runtime.replace_config(to_main);
+
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 1);
+    assert_eq!(runtime.parked[&notes], notes_orig);
+
+    runtime.backend.fail_persist = false;
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    assert!(
+        outputs()
+            .main()
+            .frame
+            .contains_center(runtime.parked[&notes])
+    );
+
+    // Part B: failed visible floating carry retains the reassignment and retries idempotently.
+    let first = window(20);
+    let second = window(21);
+    let three = three_outputs();
+    let mut observed = observation_for_windows(
+        "com.example.Test",
+        &first,
+        &[(first.clone(), frame(1050)), (second.clone(), frame(1100))],
+    );
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[0].resizable = false;
+        windows[1].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        position_outcome: Some(macos::ApplyOutcome::Unavailable),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(first.clone(), frame(1050));
+    backend.frames.insert(second.clone(), frame(1100));
+    let mut runtime = super::runtime(backend);
+    runtime.workspaces.switch(nine);
+    runtime.workspaces.own_floating(first.clone(), nine);
+    runtime.workspaces.own_floating(second.clone(), nine);
+
+    let to_third =
+        Config::parse("version = 1\n[[workspaces]]\nworkspace = 9\nmonitor = 'third-id'").unwrap();
+    runtime.replace_config(to_third);
+
+    let status = runtime.cycle(three.clone(), &cancelled).unwrap();
+    assert_eq!(status.failed, 2);
+    assert!(
+        three
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(runtime.backend.frames[&first])
+    );
+
+    runtime.backend.position_outcome = None;
+    let status = runtime.cycle(three.clone(), &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    let third_frame = three.displays()[2].frame;
+    assert!(third_frame.contains_center(runtime.backend.frames[&first]));
+    assert!(third_frame.contains_center(runtime.backend.frames[&second]));
+
+    let calls_before = runtime.backend.calls.len();
+    let status = runtime.cycle(three, &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    assert_eq!(runtime.backend.calls.len(), calls_before);
+}
+
+#[test]
+fn parked_floating_window_reloaded_across_displays_to_visible_lands_at_translated_frame() {
+    let settings = window(10);
+    let original = frame(50);
+    let cancelled = AtomicBool::new(false);
+    let mut backend = FakeBackend {
+        observation: Some(crate::NativeObservation {
+            cycle: 0,
+            mouse_down: false,
+            applications: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    };
+    backend
+        .frames
+        .insert(settings.clone(), main_parked_frame(original));
+    let route_two = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.apple.systempreferences'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = WorkspaceRuntime::with_backend_config_state(
+        ManagementScope::Both,
+        backend,
+        HashMap::from([(settings.clone(), original)]),
+        route_two,
+        None,
+    );
+    runtime
+        .workspaces
+        .own_floating(settings.clone(), WorkspaceId::TWO);
+    runtime
+        .memory
+        .bundles
+        .insert(settings.app.clone(), "com.apple.systempreferences".into());
+
+    let route_six = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.apple.systempreferences'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    runtime.replace_config(route_six);
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(status.failed, 0);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(!runtime.parked.contains_key(&settings));
+    assert_eq!(runtime.backend.frames[&settings], frame(1050));
+}
+
+#[test]
+fn failed_sibling_initial_route_retries_even_after_first_sibling_succeeds() {
+    let first = window(10);
+    let second = window(11);
+    let first_frame = frame(50);
+    let second_frame = crate::Rect {
+        x: 300,
+        y: 20,
+        width: 500,
+        height: 300,
+    };
+    let cancelled = AtomicBool::new(false);
+    let mut backend = FakeBackend {
+        observation: Some(observation_for_windows(
+            "com.google.Chrome",
+            &first,
+            &[(first.clone(), first_frame), (second.clone(), second_frame)],
+        )),
+        refuses_position: Some(|target| target.width == 500),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(first.clone(), first_frame);
+    backend.frames.insert(second.clone(), second_frame);
+    let config = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.google.Chrome'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, config);
+
+    // Cycle 1: first sibling routes to workspace 2 (so app now owns a window);
+    // second sibling's park fails transiently and stays queued for retry.
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 1);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&first),
+        Some(WorkspaceId::TWO)
+    );
+    assert_eq!(
+        runtime.workspaces.workspace_of(&second),
+        Some(WorkspaceId::ONE)
+    );
+
+    // Cycle 2: retry still routes the second sibling to workspace 2 instead of stranding it on 1.
+    runtime.backend.refuses_position = None;
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&second),
+        Some(WorkspaceId::TWO)
+    );
+    assert!(runtime.parked.contains_key(&second));
+    assert!(runtime.pending_initial_routes.is_empty());
+}
+
+#[test]
+fn park_inactive_cross_display_failure_keeps_persisted_recovery_frame() {
+    let win = window(10);
+    let cancelled = AtomicBool::new(false);
+    let mut backend = FakeBackend {
+        observation: Some(observation(&win, frame(1050))),
+        position_outcome: Some(macos::ApplyOutcome::Unavailable),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(win.clone(), frame(1050));
+    let mut runtime = runtime(backend);
+    bind(&mut runtime, WorkspaceId::SIX, &win);
+    let to_main =
+        Config::parse("version = 1\n[[workspaces]]\nworkspace = 6\nmonitor = 'main'").unwrap();
+    runtime.replace_config(to_main);
+
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 1);
+    assert_eq!(runtime.parked.get(&win), Some(&frame(50)));
+    assert_eq!(
+        runtime.parked.get(&win),
+        runtime.backend.persisted.get(&win)
+    );
+}

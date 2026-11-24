@@ -251,6 +251,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.suppressed_app = None;
     }
 
+    /// Suppress focus follow when parking the window (or app) that currently
+    /// holds focus so the next cycle does not jump to the hidden workspace.
+    pub(super) fn suppress_parked_focus(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        focused: Option<&crate::PhysicalWindowId>,
+        frontmost: Option<&AppInstanceId>,
+    ) {
+        if focused == Some(window) || frontmost == Some(&window.app) {
+            self.suppressed_focus = Some(window.clone());
+            self.suppressed_app = Some(window.app.clone());
+        }
+    }
+
     /// Bounded wait until every incoming window's restore is confirmed by the
     /// window server (pending restores keep their recovery frames). Slow
     /// applications apply moves asynchronously; hiding the outgoing workspace

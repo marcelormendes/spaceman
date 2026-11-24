@@ -304,7 +304,7 @@ fn floating_hidden_parked_tile_preserves_recovery_frame() {
 }
 
 #[test]
-fn non_resizable_window_stays_floating_on_current_workspace_when_route_rule_added() {
+fn non_resizable_window_routes_floating_when_route_rule_added() {
     let dialog = window(10);
     let cancelled = AtomicBool::new(false);
     let mut observed = observation(&dialog, frame(100));
@@ -329,13 +329,20 @@ fn non_resizable_window_stays_floating_on_current_workspace_when_route_rule_adde
     )
     .unwrap();
     runtime.replace_config(route_two);
-    runtime.cycle(outputs(), &cancelled).unwrap();
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
 
+    assert_eq!(runtime.workspaces.workspace_of(&dialog), None);
     assert_eq!(
         runtime.workspaces.floating_workspace_of(&dialog),
-        Some(WorkspaceId::ONE)
+        Some(WorkspaceId::TWO)
     );
-    assert!(!runtime.parked.contains_key(&dialog));
+    assert!(runtime.parked.contains_key(&dialog));
+    let listed: Vec<_> = status.menu[0]
+        .workspaces
+        .iter()
+        .map(|entry| entry.workspace)
+        .collect();
+    assert_eq!(listed, vec![WorkspaceId::ONE, WorkspaceId::TWO]);
 }
 
 #[test]
@@ -537,4 +544,370 @@ action = 'float'",
         runtime.workspaces.workspace_of(&other),
         Some(WorkspaceId::FOUR)
     );
+}
+
+#[test]
+fn non_resizable_window_routes_floating_on_adoption_and_cross_display() {
+    let cancelled = AtomicBool::new(false);
+
+    // Part A: System Settings (non-resizable) on Main with route -> visible workspace 6 (Secondary)
+    // is owned as floating on 6, carried onto Secondary without resizing, and listed under Secondary.
+    let settings = window(10);
+    let original = frame(50);
+    let mut observed = observation_for("com.apple.systempreferences", &settings, original);
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(settings.clone(), original);
+    let route_six = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.apple.systempreferences'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, route_six);
+
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(runtime.workspaces.workspace_of(&settings), None);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(!runtime.parked.contains_key(&settings));
+    let carried = runtime.backend.frames[&settings];
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(carried)
+    );
+    assert_eq!(carried.width, original.width);
+    assert_eq!(carried.height, original.height);
+    assert_eq!(status.menu[1].workspaces[0].workspace, WorkspaceId::SIX);
+    assert_eq!(status.menu[1].workspaces[0].apps, vec![settings.app.pid]);
+
+    // Part B: non-resizable window on Main routed to hidden workspace 7 on Secondary parks off
+    // Main's edge (even if Secondary-edge writes are refused) with recovery translated to Secondary.
+    let seven = WorkspaceId::new(7).unwrap();
+    let mut observed = observation_for("com.apple.systempreferences", &settings, original);
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        refuses_position: Some(|target| target.x >= 2000),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(settings.clone(), original);
+    let route_seven = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.apple.systempreferences'\naction = 'route'\nworkspace = 7",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, route_seven);
+
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(runtime.workspaces.workspace_of(&settings), None);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(seven)
+    );
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(runtime.parked[&settings])
+    );
+    let secondary_menu: Vec<_> = status.menu[1]
+        .workspaces
+        .iter()
+        .map(|entry| entry.workspace)
+        .collect();
+    assert_eq!(secondary_menu, vec![WorkspaceId::SIX, seven]);
+}
+
+#[test]
+fn startup_with_restored_workspace_state_applies_rules_to_already_open_windows() {
+    let keep = window(10);
+    let chrome = window_for_app(2, 20);
+    let settings = window_for_app(3, 30);
+    let cancelled = AtomicBool::new(false);
+
+    let mut persisted = Workspaces::default();
+    persisted.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+        id: SlotId(10),
+        weight: 1,
+        binding: BindingState::Bound(keep.clone()),
+    });
+    persisted.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+        id: SlotId(20),
+        weight: 1,
+        binding: BindingState::Bound(chrome.clone()),
+    });
+    persisted.own_floating(settings.clone(), WorkspaceId::ONE);
+
+    let mut observed = multi_app_observation(&[
+        ("com.example.Keep", &[(keep.clone(), frame(50))]),
+        ("com.google.Chrome", &[(chrome.clone(), frame(300))]),
+        (
+            "com.apple.systempreferences",
+            &[(settings.clone(), frame(500))],
+        ),
+    ]);
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[2] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(keep.clone(), frame(50));
+    backend.frames.insert(chrome.clone(), frame(300));
+    backend.frames.insert(settings.clone(), frame(500));
+
+    let config = Config::parse(
+        "version = 1
+[[rules]]
+bundle_id = 'com.google.Chrome'
+action = 'route'
+workspace = 2
+[[rules]]
+bundle_id = 'com.apple.systempreferences'
+action = 'route'
+workspace = 6",
+    )
+    .unwrap();
+    let mut runtime = WorkspaceRuntime::with_backend_config_state(
+        ManagementScope::Both,
+        backend,
+        HashMap::new(),
+        config,
+        Some(persisted.state()),
+    );
+
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(
+        runtime.workspaces.workspace_of(&keep),
+        Some(WorkspaceId::ONE)
+    );
+    assert_eq!(
+        runtime.workspaces.workspace_of(&chrome),
+        Some(WorkspaceId::TWO)
+    );
+    assert!(runtime.parked.contains_key(&chrome));
+    assert_eq!(runtime.workspaces.workspace_of(&settings), None);
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&settings),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(runtime.backend.frames[&settings])
+    );
+    let main_menu: Vec<_> = status.menu[0]
+        .workspaces
+        .iter()
+        .map(|entry| entry.workspace)
+        .collect();
+    assert_eq!(main_menu, vec![WorkspaceId::ONE, WorkspaceId::TWO]);
+    assert_eq!(status.menu[1].workspaces[0].workspace, WorkspaceId::SIX);
+    assert_eq!(status.menu[1].workspaces[0].apps, vec![settings.app.pid]);
+}
+
+#[test]
+fn startup_routes_all_initially_open_windows_of_ruled_app_even_with_leading_non_resizable() {
+    let popup = window(10);
+    let main_a = window(11);
+    let main_b = window(12);
+    let cancelled = AtomicBool::new(false);
+    let mut observed = observation_for_windows(
+        "com.google.Chrome",
+        &main_a,
+        &[
+            (popup.clone(), frame(50)),
+            (main_a.clone(), frame(300)),
+            (main_b.clone(), frame(600)),
+        ],
+    );
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[0].resizable = false;
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(popup.clone(), frame(50));
+    backend.frames.insert(main_a.clone(), frame(300));
+    backend.frames.insert(main_b.clone(), frame(600));
+    let config = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.google.Chrome'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, config);
+
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&popup),
+        Some(WorkspaceId::TWO)
+    );
+    assert_eq!(
+        runtime.workspaces.workspace_of(&main_a),
+        Some(WorkspaceId::TWO)
+    );
+    assert_eq!(
+        runtime.workspaces.workspace_of(&main_b),
+        Some(WorkspaceId::TWO)
+    );
+    assert!(runtime.workspaces.windows(WorkspaceId::ONE).is_empty());
+    assert!(runtime.parked.contains_key(&popup));
+    assert!(runtime.parked.contains_key(&main_a));
+    assert!(runtime.parked.contains_key(&main_b));
+    let main_menu: Vec<_> = status.menu[0]
+        .workspaces
+        .iter()
+        .map(|entry| entry.workspace)
+        .collect();
+    assert_eq!(main_menu, vec![WorkspaceId::ONE, WorkspaceId::TWO]);
+}
+
+#[test]
+fn cross_display_initial_route_parks_on_source_display_and_retries_after_failure() {
+    let notes = window(10);
+    let seven = WorkspaceId::new(7).unwrap();
+    let cancelled = AtomicBool::new(false);
+    let mut backend = FakeBackend {
+        observation: Some(observation_for("com.apple.Notes", &notes, frame(50))),
+        position_outcome: Some(macos::ApplyOutcome::Unavailable),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(notes.clone(), frame(50));
+    let config = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.apple.Notes'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, config);
+    // Secondary display is on workspace 7, so workspace 6 is hidden on Secondary.
+    runtime.workspaces.switch(seven);
+
+    // Cycle 1: transient park failure rolls back to workspace 1 and queues a bounded retry.
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 1);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&notes),
+        Some(WorkspaceId::ONE)
+    );
+
+    // Cycle 2: parking succeeds on Main's edge even when Secondary-edge writes are clamped,
+    // translates the recovery frame to Secondary, and populates workspace 6 in Secondary's menu.
+    runtime.backend.position_outcome = None;
+    runtime.backend.refuses_position = Some(|target| target.x >= 2000);
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(status.failed, 0);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&notes),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
+            .contains_center(runtime.parked[&notes])
+    );
+    let secondary_menu: Vec<_> = status.menu[1]
+        .workspaces
+        .iter()
+        .map(|entry| entry.workspace)
+        .collect();
+    assert_eq!(secondary_menu, vec![WorkspaceId::SIX, seven]);
+}
+
+#[test]
+fn exhausted_initial_route_falls_back_to_current_display_and_failed_restore_rolls_back_recovery() {
+    let cancelled = AtomicBool::new(false);
+
+    // Part A: a permanently unparkable single-window initial route stays on workspace 1
+    // and stops retrying after 3 attempts instead of looping forever.
+    let stuck = window(10);
+    let mut backend = FakeBackend {
+        observation: Some(observation_for("com.example.Stuck", &stuck, frame(50))),
+        refuses_position: Some(|target| target.x < 0 || target.x >= 1000),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(stuck.clone(), frame(50));
+    let route_two = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Stuck'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, route_two);
+    for _ in 0..3 {
+        let status = runtime.cycle(outputs(), &cancelled).unwrap();
+        assert_eq!(status.failed, 1);
+        assert_eq!(
+            runtime.workspaces.workspace_of(&stuck),
+            Some(WorkspaceId::ONE)
+        );
+    }
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 0);
+    assert!(runtime.pending_initial_routes.is_empty());
+    assert_eq!(
+        runtime.workspaces.workspace_of(&stuck),
+        Some(WorkspaceId::ONE)
+    );
+
+    // Part B: failed restore on cross-display reload rolls recovery back to the source display.
+    let parked_win = window(20);
+    let original = frame(50);
+    let mut backend = FakeBackend {
+        observation: Some(crate::NativeObservation {
+            cycle: 0,
+            mouse_down: false,
+            applications: Vec::new(),
+        }),
+        position_outcome: Some(macos::ApplyOutcome::Unavailable),
+        ..FakeBackend::default()
+    };
+    backend
+        .frames
+        .insert(parked_win.clone(), main_parked_frame(original));
+    let route_two = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 2",
+    )
+    .unwrap();
+    let mut runtime = WorkspaceRuntime::with_backend_config_state(
+        ManagementScope::Both,
+        backend,
+        HashMap::from([(parked_win.clone(), original)]),
+        route_two,
+        None,
+    );
+    bind(&mut runtime, WorkspaceId::TWO, &parked_win);
+    runtime
+        .memory
+        .bundles
+        .insert(parked_win.app.clone(), "com.example.Test".into());
+    let route_six = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    runtime.replace_config(route_six);
+    let status = runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(status.failed, 1);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&parked_win),
+        Some(WorkspaceId::TWO)
+    );
+    assert_eq!(runtime.parked.get(&parked_win), Some(&original));
 }

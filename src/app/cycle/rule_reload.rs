@@ -298,16 +298,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     pass.retry_windows.insert(window);
                     return;
                 }
-                if !was_tiled && observed_resizable == Some(false) {
-                    // Movable non-resizable windows remain floating on the
-                    // workspace where they were first observed.
-                    return;
-                }
                 if old_disp == WindowDisposition::Floating {
                     self.manual_floating.remove(&window);
                 }
                 let stay_floating = !was_tiled
-                    && (self.manual_floating.contains(&window)
+                    && (observed_resizable == Some(false)
+                        || self.manual_floating.contains(&window)
                         || (observed_resizable.is_none()
                             && old_disp != WindowDisposition::Floating));
                 if source == target {
@@ -394,7 +390,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let source_output = output_for(&self.workspaces, source, pass.outputs);
         let target_output = output_for(&self.workspaces, target, pass.outputs);
         let was_parked = self.parked.contains_key(window);
-        if !was_parked || source_output != target_output {
+        if !was_parked {
             let outcome = if source_output == target_output {
                 self.park_window(window, target_output, pass.outputs)
             } else {
@@ -412,10 +408,25 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     return;
                 }
             }
-            if !was_parked && (pass.focused == Some(window) || pass.frontmost == Some(&window.app))
-            {
-                self.suppressed_focus = Some(window.clone());
-                self.suppressed_app = Some(window.app.clone());
+            self.suppress_parked_focus(window, pass.focused, pass.frontmost);
+        } else if source_output != target_output
+            && let Some(original) = self.parked.get(window).copied()
+            && !target_output.contains_center(original)
+        {
+            let from_output = pass
+                .outputs
+                .frames()
+                .find(|display| display.contains_center(original))
+                .unwrap_or(source_output);
+            let relocated = crate::app::move_workspace::translate_frame_to_output(
+                original,
+                from_output,
+                target_output,
+            );
+            if !self.record_recovery(window, relocated) {
+                *pass.failed += 1;
+                pass.retry_windows.insert(window.clone());
+                return;
             }
         }
         self.transfer_for_rule(window, target, was_tiled, stay_floating);
@@ -442,6 +453,28 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let target_output = output_for(&self.workspaces, target, pass.outputs);
         let was_parked = self.parked.contains_key(window);
         if was_parked {
+            let mut relocated_from = None;
+            if source_output != target_output
+                && let Some(original) = self.parked.get(window).copied()
+                && !target_output.contains_center(original)
+            {
+                let from_output = pass
+                    .outputs
+                    .frames()
+                    .find(|display| display.contains_center(original))
+                    .unwrap_or(source_output);
+                let relocated = crate::app::move_workspace::translate_frame_to_output(
+                    original,
+                    from_output,
+                    target_output,
+                );
+                if !self.record_recovery(window, relocated) {
+                    *pass.failed += 1;
+                    pass.retry_windows.insert(window.clone());
+                    return;
+                }
+                relocated_from = Some(original);
+            }
             match self.restore_window(window) {
                 macos::ApplyOutcome::Applied => {}
                 macos::ApplyOutcome::Gone => {
@@ -449,20 +482,28 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     return;
                 }
                 _ => {
+                    if let Some(original) = relocated_from
+                        && !self.record_recovery(window, original)
+                    {
+                        self.parked.insert(window.clone(), original);
+                    }
                     *pass.failed += 1;
                     pass.retry_windows.insert(window.clone());
                     return;
                 }
             }
         }
+        if !was_parked
+            && stay_floating
+            && source_output != target_output
+            && !self.carry_floating_window(window, source_output, target_output)
+        {
+            *pass.failed += 1;
+            pass.retry_windows.insert(window.clone());
+            return;
+        }
         self.transfer_for_rule(window, target, was_tiled, stay_floating);
-        if stay_floating {
-            if source_output != target_output
-                && !self.carry_floating_window(window, source_output, target_output)
-            {
-                *pass.failed += 1;
-            }
-        } else {
+        if !stay_floating {
             pass.relayout.insert(target);
         }
         if was_parked {
@@ -487,7 +528,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         pass: &mut ReloadPass<'_>,
     ) {
         for (bundle_id, window) in unowned {
-            if !window.resizable || !pending.includes(&window.id) {
+            if !pending.includes(&window.id) {
                 continue;
             }
             let old_disp = pending
@@ -506,15 +547,31 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 pass.retry_windows.insert(window.id);
                 continue;
             }
+            let stay_floating = !window.resizable;
             let target_output = output_for(&self.workspaces, target, pass.outputs);
+            let source_output = pass
+                .visible_list
+                .iter()
+                .find(|resolved| resolved.output.contains_center(window.frame))
+                .map_or(target_output, |resolved| resolved.output);
             if pass.visible.contains(&target) {
-                pass.relayout.insert(target);
+                if stay_floating {
+                    if source_output != target_output
+                        && !self.carry_floating_window(&window.id, source_output, target_output)
+                    {
+                        *pass.failed += 1;
+                        pass.retry_windows.insert(window.id);
+                        continue;
+                    }
+                    self.workspaces.own_floating(window.id.clone(), target);
+                } else {
+                    self.workspaces
+                        .engine_mut(target)
+                        .insert_bound_window(window.id.clone());
+                    self.exit_fullscreen_if_split(target);
+                    pass.relayout.insert(target);
+                }
             } else {
-                let source_output = pass
-                    .visible_list
-                    .iter()
-                    .find(|resolved| resolved.output.contains_center(window.frame))
-                    .map_or(target_output, |resolved| resolved.output);
                 let parked = if source_output == target_output {
                     self.park_window(&window.id, target_output, pass.outputs)
                 } else {
@@ -525,15 +582,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     pass.retry_windows.insert(window.id);
                     continue;
                 }
-                if pass.focused == Some(&window.id) || pass.frontmost == Some(&window.id.app) {
-                    self.suppressed_focus = Some(window.id.clone());
-                    self.suppressed_app = Some(window.id.app.clone());
+                self.suppress_parked_focus(&window.id, pass.focused, pass.frontmost);
+                if stay_floating {
+                    self.workspaces.own_floating(window.id.clone(), target);
+                } else {
+                    self.workspaces
+                        .engine_mut(target)
+                        .insert_bound_window(window.id.clone());
+                    self.exit_fullscreen_if_split(target);
                 }
             }
-            self.workspaces
-                .engine_mut(target)
-                .insert_bound_window(window.id.clone());
-            self.exit_fullscreen_if_split(target);
             log_event!(
                 "rule reload: routed unowned {:?} -> workspace {}",
                 window.id,

@@ -460,7 +460,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     /// Durably record `frame` as the window's recovery frame, replacing any
     /// earlier one; memory rolls back when persistence fails.
-    fn record_recovery(&mut self, window: &crate::PhysicalWindowId, frame: crate::Rect) -> bool {
+    pub(super) fn record_recovery(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        frame: crate::Rect,
+    ) -> bool {
         let previous = self.parked.insert(window.clone(), frame);
         if previous == Some(frame) {
             return true;
@@ -474,6 +478,34 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return false;
         }
         true
+    }
+
+    /// Translate a parked window's recovery frame from the display it currently
+    /// sits on onto `target_output` and persist the update.
+    pub(super) fn relocate_parked_recovery(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        fallback_from: Option<crate::Rect>,
+        target_output: crate::Rect,
+        outputs: &macos::DisplayOutputs,
+    ) -> bool {
+        let Some(original) = self.parked.get(window).copied() else {
+            return true;
+        };
+        if target_output.contains_center(original) {
+            return true;
+        }
+        let displays: Vec<_> = outputs.frames().collect();
+        let Some(from_output) = Self::display_for_frame(original, &displays).or(fallback_from)
+        else {
+            return true;
+        };
+        if from_output == target_output {
+            return true;
+        }
+        let relocated =
+            super::move_workspace::translate_frame_to_output(original, from_output, target_output);
+        self.record_recovery(window, relocated)
     }
 
     /// The connected display that currently owns `frame`: its center first,

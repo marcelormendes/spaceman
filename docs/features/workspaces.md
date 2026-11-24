@@ -140,6 +140,10 @@ on the same letter.
 
 ## Existing Checks
 
+- Unit (FakeBackend), `src/app/tests/rule_reload.rs`: live rule reloads apply added/changed `route`,
+  `float`, and `ignore` rules to visible and parked windows, preserve manually moved windows across
+  unrelated edits and restarts, skip Scratchpad windows, and keep recovery metadata in sync on
+  rollback failure.
 - Unit (FakeBackend), `src/app/tests/switching.rs`:
   `switching_reveals_and_lays_out_incoming_beneath_before_hiding_outgoing` (ordering of reveal,
   layout, hide), `switch_keeps_outgoing_visible_when_incoming_reveal_never_arrives`

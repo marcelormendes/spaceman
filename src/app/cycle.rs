@@ -1,12 +1,14 @@
 mod affinity;
 mod omission;
 mod readback;
+mod rule_reload;
 pub(super) use omission::Omission;
 #[cfg(test)]
 pub(super) use readback::ASYNC_BOUNCE_SETTLE;
 pub(super) use readback::{APPLY_ATTEMPT_LIMIT, AppliedFrame, record_apply_attempt};
 
 use affinity::{FrozenAffinityPolicy, FrozenWindowAffinity};
+use rule_reload::update_observed_frames;
 
 use super::*;
 use crate::journal::PlacementSource;
@@ -193,6 +195,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .backend
             .snapshot(0, &outputs)
             .map_err(|error| format!("Observation error: {error}"))?;
+        let focus = (focused.as_ref(), frontmost.as_ref());
+        self.apply_pending_rule_reload(
+            &outputs,
+            &visible,
+            &mut observation,
+            focus,
+            cancelled,
+            &mut failed,
+        );
         let affinity_policy =
             self.freeze_window_affinities(&observation, &visible, server_frames)?;
         // Taken after the Accessibility snapshot so a window listed here was
@@ -767,30 +778,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 Decision::NativeTabAmbiguous { .. }
                 | Decision::ObservationUnavailable { .. }
                 | Decision::MouseDownDeferred => {}
-            }
-        }
-    }
-}
-
-fn update_observed_frames(
-    observation: &mut crate::NativeObservation,
-    placements: &[crate::Placement],
-) {
-    let frames: HashMap<_, _> = placements
-        .iter()
-        .filter_map(|placement| {
-            placement
-                .window
-                .as_ref()
-                .map(|window| (window, placement.frame))
-        })
-        .collect();
-    for application in &mut observation.applications {
-        if let crate::AppObservation::Complete { windows, .. } = application {
-            for window in windows {
-                if let Some(frame) = frames.get(&window.id) {
-                    window.frame = *frame;
-                }
             }
         }
     }

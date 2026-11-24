@@ -17,6 +17,11 @@ pub(super) trait WorkspaceBackend {
         outputs: &macos::DisplayOutputs,
     ) -> Result<crate::NativeObservation, String>;
     fn is_process_running(&mut self, app: &AppInstanceId) -> bool;
+    /// Bundle ID for a running app whose windows have not been observed in this
+    /// session yet (for example, parked on a hidden workspace across a restart).
+    fn bundle_id(&mut self, _app: &AppInstanceId) -> Option<String> {
+        None
+    }
     /// True only when a visible app successfully reports an empty AXWindows list.
     fn confirms_no_windows(&mut self, app: &AppInstanceId) -> bool;
     fn apply_observed(
@@ -139,6 +144,10 @@ impl WorkspaceBackend for MacWorkspaceBackend {
 
     fn is_process_running(&mut self, app: &AppInstanceId) -> bool {
         macos::is_process_incarnation_running(app)
+    }
+
+    fn bundle_id(&mut self, app: &AppInstanceId) -> Option<String> {
+        macos::application_bundle_id(app)
     }
 
     fn frame(

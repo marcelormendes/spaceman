@@ -408,10 +408,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     return;
                 }
             }
-            if !was_parked && (pass.focused == Some(window) || pass.frontmost == Some(&window.app))
-            {
-                self.suppressed_focus = Some(window.clone());
-                self.suppressed_app = Some(window.app.clone());
+            if !was_parked {
+                self.suppress_parked_focus(window, pass.focused, pass.frontmost);
             }
         }
         self.transfer_for_rule(window, target, was_tiled, stay_floating);
@@ -466,14 +464,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
+        if stay_floating
+            && source_output != target_output
+            && !self.carry_floating_window(window, source_output, target_output)
+        {
+            *pass.failed += 1;
+            pass.retry_windows.insert(window.clone());
+            return;
+        }
         self.transfer_for_rule(window, target, was_tiled, stay_floating);
-        if stay_floating {
-            if source_output != target_output
-                && !self.carry_floating_window(window, source_output, target_output)
-            {
-                *pass.failed += 1;
-            }
-        } else {
+        if !stay_floating {
             pass.relayout.insert(target);
         }
         if was_parked {
@@ -526,12 +526,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .map_or(target_output, |resolved| resolved.output);
             if pass.visible.contains(&target) {
                 if stay_floating {
-                    self.workspaces.own_floating(window.id.clone(), target);
                     if source_output != target_output
                         && !self.carry_floating_window(&window.id, source_output, target_output)
                     {
                         *pass.failed += 1;
+                        pass.retry_windows.insert(window.id);
+                        continue;
                     }
+                    self.workspaces.own_floating(window.id.clone(), target);
                 } else {
                     self.workspaces
                         .engine_mut(target)
@@ -550,10 +552,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     pass.retry_windows.insert(window.id);
                     continue;
                 }
-                if pass.focused == Some(&window.id) || pass.frontmost == Some(&window.id.app) {
-                    self.suppressed_focus = Some(window.id.clone());
-                    self.suppressed_app = Some(window.id.app.clone());
-                }
+                self.suppress_parked_focus(&window.id, pass.focused, pass.frontmost);
                 if stay_floating {
                     self.workspaces.own_floating(window.id.clone(), target);
                 } else {

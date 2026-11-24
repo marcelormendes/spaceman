@@ -200,16 +200,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     /// Routes newly observed non-resizable windows that matched a `route` rule
     /// to their target workspace while keeping them floating (never tiled).
+    /// Defers ownership until any required cross-display carry or parking
+    /// succeeds so transient failures retry cleanly on the next cycle.
     pub(super) fn apply_floating_routes(
         &mut self,
         routes: &[(crate::PhysicalWindowId, WorkspaceId, crate::Rect)],
         visible: &[ResolvedWorkspace],
         outputs: &macos::DisplayOutputs,
+        focus: (Option<&crate::PhysicalWindowId>, Option<&AppInstanceId>),
         failed: &mut usize,
     ) {
         if routes.is_empty() {
             return;
         }
+        let (focused, frontmost) = focus;
         let visible_workspaces: HashSet<_> =
             visible.iter().map(|resolved| resolved.workspace).collect();
         for (window, target, frame) in routes {
@@ -219,15 +223,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .map(|resolved| resolved.output);
             let target_output = output_for(&self.workspaces, *target, outputs);
             if visible_workspaces.contains(target) {
-                log_event!("route floating {:?} -> workspace {}", window, target);
-                self.workspaces.own_floating(window.clone(), *target);
-                self.note_placement(window, PlacementSource::Rule, *target);
                 if let Some(source_output) = source_output
                     && source_output != target_output
                     && !self.carry_floating_window(window, source_output, target_output)
                 {
                     *failed += 1;
+                    continue;
                 }
+                log_event!("route floating {:?} -> workspace {}", window, target);
+                self.workspaces.own_floating(window.clone(), *target);
+                self.note_placement(window, PlacementSource::Rule, *target);
             } else {
                 let outcome = match source_output {
                     Some(source_output) if source_output != target_output => {
@@ -242,6 +247,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             window,
                             target
                         );
+                        self.suppress_parked_focus(window, focused, frontmost);
                         self.workspaces.own_floating(window.clone(), *target);
                         self.note_placement(window, PlacementSource::Rule, *target);
                     }
@@ -252,6 +258,53 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
+    }
+
+    /// Moves newly inserted tiled windows to their routed target workspaces,
+    /// parking across displays when needed and dropping the temporary slot on
+    /// transient park failure so the next cycle retries instead of stranding.
+    pub(super) fn apply_inserted_routes(
+        &mut self,
+        resolved: &ResolvedWorkspace,
+        routes: &[(crate::PhysicalWindowId, WorkspaceId)],
+        affinity_policy: &FrozenAffinityPolicy,
+        outputs: &macos::DisplayOutputs,
+        focus: (Option<&crate::PhysicalWindowId>, Option<&AppInstanceId>),
+        failed: &mut usize,
+    ) -> HashSet<WorkspaceId> {
+        let workspace = resolved.workspace;
+        let output = resolved.output;
+        let (focused, frontmost) = focus;
+        let mut routed_targets = HashSet::new();
+        for (window, target) in routes {
+            if !affinity_policy.visible_workspaces.contains(target) {
+                let target_output = output_for(&self.workspaces, *target, outputs);
+                let outcome = if output == target_output {
+                    self.park_window(window, target_output, outputs)
+                } else {
+                    self.park_window_across(window, output, target_output, outputs)
+                };
+                match outcome {
+                    macos::ApplyOutcome::Applied => {
+                        self.suppress_parked_focus(window, focused, frontmost);
+                    }
+                    macos::ApplyOutcome::Gone => {
+                        self.forget_window(workspace, window);
+                        continue;
+                    }
+                    _ => {
+                        *failed += 1;
+                        self.forget_window(workspace, window);
+                        continue;
+                    }
+                }
+            }
+            if self.workspaces.move_window(window, *target).is_none() {
+                continue;
+            }
+            routed_targets.insert(*target);
+        }
+        routed_targets
     }
 
     /// Hidden workspaces are not reconciled, so an app that quit while its

@@ -31,7 +31,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     }
 
     /// Translate parked recovery frames and carry visible floating windows for
-    /// workspaces whose display assignment changed on config reload.
+    /// workspaces whose display assignment changed on config reload. Failed
+    /// updates stay queued so the next cycle retries them idempotently.
     pub(super) fn relocate_reassigned_workspaces(
         &mut self,
         outputs: &macos::DisplayOutputs,
@@ -51,6 +52,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 continue;
             }
             let is_visible = visible_workspaces.contains(&workspace);
+            let mut any_failed = false;
             for window in self.workspaces.windows(workspace) {
                 if let Some(original) = self.parked.get(&window).copied() {
                     if old_output.contains_center(original) {
@@ -59,14 +61,27 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         );
                         if !self.record_recovery(&window, relocated) {
                             *failed += 1;
+                            any_failed = true;
                         }
                     }
                 } else if is_visible
                     && self.workspaces.floating_workspace_of(&window) == Some(workspace)
-                    && !self.carry_floating_window(&window, old_output, new_output)
                 {
-                    *failed += 1;
+                    let still_on_old_output = self
+                        .backend
+                        .window_server_frame(&window)
+                        .or_else(|| self.backend.frame(&window).ok())
+                        .is_none_or(|frame| old_output.contains_center(frame));
+                    if still_on_old_output
+                        && !self.carry_floating_window(&window, old_output, new_output)
+                    {
+                        *failed += 1;
+                        any_failed = true;
+                    }
                 }
+            }
+            if any_failed {
+                self.displays.reassigned.insert(workspace, old_selector);
             }
         }
     }

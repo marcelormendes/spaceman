@@ -113,6 +113,9 @@ pub struct MainThreadAgent {
     exit_intent: Option<ExitIntent>,
     next_restore_retry: Option<Instant>,
     active_workspaces: Vec<WorkspaceId>,
+    /// Named workspaces currently visible or holding windows, so removing a
+    /// rule from config does not drop their shortcut while still in use.
+    occupied_named_workspaces: Vec<WorkspaceId>,
     last_error: Option<String>,
     latest_debug: Option<RuntimeDebug>,
     pending_inputs: InputQueue,
@@ -208,6 +211,7 @@ impl MainThreadAgent {
             exit_intent: None,
             next_restore_retry: None,
             active_workspaces: init.scope.initial_workspaces().to_vec(),
+            occupied_named_workspaces: Vec::new(),
             last_error: hotkey_error,
             latest_debug: None,
             pending_inputs: InputQueue::default(),
@@ -314,6 +318,13 @@ impl MainThreadAgent {
                                 .flatten()
                                 .min();
                         self.active_workspaces.clone_from(&status.active);
+                        self.occupied_named_workspaces = status
+                            .menu
+                            .iter()
+                            .flat_map(|display| &display.workspaces)
+                            .map(|entry| entry.workspace)
+                            .filter(|workspace| workspace.letter().is_some())
+                            .collect();
                         if self.hud
                             && let Some(hud) = status.hud.clone()
                         {
@@ -501,7 +512,7 @@ impl MainThreadAgent {
                     if let Some(config) = probe.config {
                         self.hud = config.hud;
                         status_item::set_hud(config.hud);
-                        self.refresh_hotkey_workspaces(&config.named_workspaces);
+                        self.refresh_hotkey_workspaces(&config.workspaces);
                     }
                 }
             }

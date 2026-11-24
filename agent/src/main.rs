@@ -49,6 +49,8 @@ pub struct Ui {
     pub agent: Option<UiAgentSnapshot>,
     pub activity: activity::ActivityPane,
     bridge: Option<UiBridge>,
+    #[cfg(test)]
+    pub(crate) sent_actions: std::cell::RefCell<Vec<UiAction>>,
     window: Option<rune::AppHandle<Ui>>,
     hud_driver: Option<hud::HudDriver>,
     pub hud_preview: Option<hud::HudPreview>,
@@ -94,6 +96,8 @@ impl Ui {
             agent: None,
             activity: activity::ActivityPane::default(),
             bridge: Some(bridge),
+            #[cfg(test)]
+            sent_actions: std::cell::RefCell::new(Vec::new()),
             window: None,
             hud_driver: None,
             hud_preview: None,
@@ -189,6 +193,10 @@ impl Ui {
     }
 
     fn send_action(&self, action: UiAction) {
+        #[cfg(test)]
+        if !self.fixture {
+            self.sent_actions.borrow_mut().push(action);
+        }
         if !self.fixture
             && let Some(bridge) = &self.bridge
         {
@@ -574,5 +582,40 @@ mod tests {
         // Security invariant: config doc is untouched.
         assert_eq!(ui.doc.hud(), initial_hud);
         assert_eq!(ui.doc.rules().len(), initial_rules);
+    }
+
+    #[test]
+    fn edit_and_retile_queues_retile_for_rule_changes_and_skips_on_error() {
+        let mut ui = playground::blank_fixture();
+        ui.fixture = false;
+        ui.doc = Doc::parse("version = 1\n");
+
+        ui.edit_and_retile(|doc| {
+            doc.add(
+                "com.tinyspeck.slackmacgap",
+                Place::Workspace(spaceman::WorkspaceId::TWO),
+            );
+        });
+        assert_eq!(ui.error, None);
+        assert_eq!(*ui.sent_actions.borrow(), vec![UiAction::Retile]);
+
+        ui.edit_and_retile(|doc| doc.place(0, Place::Workspace(spaceman::WorkspaceId::FOUR)));
+        assert_eq!(ui.error, None);
+        assert_eq!(
+            *ui.sent_actions.borrow(),
+            vec![UiAction::Retile, UiAction::Retile]
+        );
+
+        ui.edit_and_retile(|doc| doc.remove(0));
+        assert_eq!(ui.error, None);
+        assert_eq!(ui.doc.rules().len(), 0);
+        assert_eq!(ui.sent_actions.borrow().len(), 3);
+
+        // A broken config refuses to save and must not trigger a retile.
+        ui.doc = Doc::parse("version = 1\n[[rules]]\naction = \"route\"\n");
+        ui.sent_actions.borrow_mut().clear();
+        ui.edit_and_retile(|doc| doc.add("com.example.App", Place::Float));
+        assert!(ui.error.is_some());
+        assert!(ui.sent_actions.borrow().is_empty());
     }
 }

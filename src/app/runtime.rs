@@ -154,7 +154,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         config.configure_workspaces(&mut self.workspaces);
         let previous = std::mem::replace(&mut self.config, config);
         match &mut self.pending_rule_reload {
-            Some(pending) => pending.reset_for_new_reload(),
+            Some(pending) => pending.advance_for_new_reload(previous),
             None => self.pending_rule_reload = Some(cycle::PendingRuleReload::new(previous)),
         }
     }

@@ -5,32 +5,42 @@ use super::*;
 const MAX_RELOAD_ATTEMPTS: u8 = 3;
 
 pub(super) struct PendingRuleReload {
+    /// Baseline config for windows not in `deferred`.
     previous: Config,
+    /// Earlier baseline per window that failed or deferred a prior reload pass,
+    /// so a newer reload advances `previous` for completed windows without
+    /// losing the unfinished windows' original baseline.
+    deferred: HashMap<crate::PhysicalWindowId, Config>,
     attempts: u8,
-    /// When retrying after a partial failure or unavailable observation, only
-    /// revisit the windows that did not finish so manually moved windows are
-    /// never re-routed.
-    only_windows: Option<HashSet<crate::PhysicalWindowId>>,
+    /// When true, only windows in `deferred` are visited (pure retry cycle).
+    retry_only: bool,
 }
 
 impl PendingRuleReload {
-    pub(super) const fn new(previous: Config) -> Self {
+    pub(super) fn new(previous: Config) -> Self {
         Self {
             previous,
+            deferred: HashMap::new(),
             attempts: 0,
-            only_windows: None,
+            retry_only: false,
         }
     }
 
-    pub(super) fn reset_for_new_reload(&mut self) {
+    pub(super) fn advance_for_new_reload(&mut self, applied: Config) {
+        if self.retry_only {
+            // Earlier cycle already applied `applied` to every non-deferred window.
+            self.previous = applied;
+        }
         self.attempts = 0;
-        self.only_windows = None;
+        self.retry_only = false;
     }
 
     fn includes(&self, window: &crate::PhysicalWindowId) -> bool {
-        self.only_windows
-            .as_ref()
-            .is_none_or(|windows| windows.contains(window))
+        !self.retry_only || self.deferred.contains_key(window)
+    }
+
+    fn baseline_for(&self, window: &crate::PhysicalWindowId) -> &Config {
+        self.deferred.get(window).unwrap_or(&self.previous)
     }
 }
 
@@ -108,7 +118,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 pass.retry_windows.insert(entry.window);
                 continue;
             }
-            self.apply_owned_rule_change(&pending.previous, entry, &index, &mut pass);
+            let baseline = pending.baseline_for(&entry.window);
+            self.apply_owned_rule_change(baseline, entry, &index, &mut pass);
         }
 
         self.route_unowned_windows(&pending, index.unowned, &mut pass);
@@ -135,8 +146,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
         if !retry_windows.is_empty() {
             if pending.attempts + 1 < MAX_RELOAD_ATTEMPTS {
+                let deferred = retry_windows
+                    .into_iter()
+                    .map(|window| {
+                        let baseline = pending.baseline_for(&window).clone();
+                        (window, baseline)
+                    })
+                    .collect();
                 pending.attempts += 1;
-                pending.only_windows = Some(retry_windows);
+                pending.deferred = deferred;
+                pending.retry_only = true;
                 self.pending_rule_reload = Some(pending);
             } else {
                 let mut left: Vec<_> = retry_windows.into_iter().collect();
@@ -275,6 +294,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             WindowDisposition::Route(target) => {
                 if let Err(error) = self.ensure_managed_workspace(target) {
                     log_event!("rule reload: skipped {:?}: {error}", window);
+                    *pass.failed += 1;
+                    pass.retry_windows.insert(window);
                     return;
                 }
                 if !was_tiled && observed_resizable == Some(false) {
@@ -469,7 +490,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             if !window.resizable || !pending.includes(&window.id) {
                 continue;
             }
-            let old_disp = pending.previous.disposition(&bundle_id, &window);
+            let old_disp = pending
+                .baseline_for(&window.id)
+                .disposition(&bundle_id, &window);
             let new_disp = self.config.disposition(&bundle_id, &window);
             if old_disp == new_disp {
                 continue;
@@ -479,6 +502,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             };
             if let Err(error) = self.ensure_managed_workspace(target) {
                 log_event!("rule reload: skipped {:?}: {error}", window.id);
+                *pass.failed += 1;
+                pass.retry_windows.insert(window.id);
                 continue;
             }
             let target_output = output_for(&self.workspaces, target, pass.outputs);

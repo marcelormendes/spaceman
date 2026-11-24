@@ -494,8 +494,26 @@ workspace = 3",
     // only finish `Test` and leave `Other` on workspace 4.
     let _ = runtime.workspaces.move_window(&other, WorkspaceId::FOUR);
 
-    // Cycle 2: `Test` observation returns, but parking temporarily fails.
+    // Cycle 2: `Test` observation returns, but parking temporarily fails;
+    // meanwhile a second unrelated config edit arrives and must NOT re-route
+    // `Other` (which already completed and was manually moved to workspace 4).
     runtime.backend.observation = saved_obs;
+    let third_reload = Config::parse(
+        "version = 1
+[[rules]]
+bundle_id = 'com.example.Test'
+action = 'route'
+workspace = 2
+[[rules]]
+bundle_id = 'com.example.Other'
+action = 'route'
+workspace = 3
+[[rules]]
+bundle_id = 'com.example.Unused'
+action = 'float'",
+    )
+    .unwrap();
+    runtime.replace_config(third_reload);
     runtime.backend.position_outcome = Some(macos::ApplyOutcome::Unavailable);
     runtime.cycle(outputs(), &cancelled).unwrap();
     assert_eq!(

@@ -16,7 +16,9 @@ const LOGIN_STATUS_TTL: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ProbeConfig {
     pub(super) hud: bool,
-    pub(super) named_workspaces: Vec<(WorkspaceId, DisplaySelector)>,
+    /// All numbered workspaces plus config-referenced named workspaces, with
+    /// their configured display assignments.
+    pub(super) workspaces: Vec<(WorkspaceId, DisplaySelector)>,
 }
 
 /// Settings the agent polls but only the user changes. Reading them means an XPC
@@ -95,16 +97,16 @@ fn read_probe_config() -> Option<ProbeConfig> {
     let config = Config::load().ok()?;
     let mut configured = Workspaces::default();
     config.configure_workspaces(&mut configured);
-    let mut named_workspaces: Vec<_> = config
-        .named_workspaces()
+    let mut workspaces: Vec<_> = WorkspaceId::numbered()
+        .chain(config.named_workspaces())
         .collect::<HashSet<_>>()
         .into_iter()
         .map(|workspace| (workspace, configured.assignment(workspace).clone()))
         .collect();
-    named_workspaces.sort();
+    workspaces.sort();
     Some(ProbeConfig {
         hud: config.hud(),
-        named_workspaces,
+        workspaces,
     })
 }
 
@@ -167,7 +169,7 @@ mod tests {
             || {
                 Some(ProbeConfig {
                     hud: true,
-                    named_workspaces: Vec::new(),
+                    workspaces: Vec::new(),
                 })
             },
             || {
@@ -243,10 +245,7 @@ mod tests {
             || {
                 Some(ProbeConfig {
                     hud: false,
-                    named_workspaces: vec![(
-                        WorkspaceId::named('M').unwrap(),
-                        DisplaySelector::Main,
-                    )],
+                    workspaces: vec![(WorkspaceId::named('M').unwrap(), DisplaySelector::Main)],
                 })
             },
             || unreachable!("login status is still fresh"),
@@ -258,7 +257,7 @@ mod tests {
             probe
                 .config
                 .as_ref()
-                .map(|config| config.named_workspaces.as_slice()),
+                .map(|config| config.workspaces.as_slice()),
             Some([(WorkspaceId::named('M').unwrap(), DisplaySelector::Main)].as_slice())
         );
     }

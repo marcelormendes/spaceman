@@ -4,7 +4,7 @@ use super::*;
 /// permanently broken window never loops forever.
 const MAX_RELOAD_ATTEMPTS: u8 = 3;
 
-pub(super) struct PendingRuleReload {
+pub(in crate::app) struct PendingRuleReload {
     /// Baseline config for windows not in `deferred`.
     previous: Config,
     /// Earlier baseline per window that failed or deferred a prior reload pass,
@@ -17,7 +17,7 @@ pub(super) struct PendingRuleReload {
 }
 
 impl PendingRuleReload {
-    pub(super) fn new(previous: Config) -> Self {
+    pub(in crate::app) fn new(previous: Config) -> Self {
         Self {
             previous,
             deferred: HashMap::new(),
@@ -26,7 +26,7 @@ impl PendingRuleReload {
         }
     }
 
-    pub(super) fn advance_for_new_reload(&mut self, applied: Config) {
+    pub(in crate::app) fn advance_for_new_reload(&mut self, applied: Config) {
         if self.retry_only {
             // Earlier cycle already applied `applied` to every non-deferred window.
             self.previous = applied;

@@ -49,6 +49,8 @@ pub struct Ui {
     pub agent: Option<UiAgentSnapshot>,
     pub activity: activity::ActivityPane,
     bridge: Option<UiBridge>,
+    #[cfg(test)]
+    pub(crate) sent_actions: std::cell::RefCell<Vec<UiAction>>,
     window: Option<rune::AppHandle<Ui>>,
     hud_driver: Option<hud::HudDriver>,
     pub hud_preview: Option<hud::HudPreview>,
@@ -96,6 +98,8 @@ impl Ui {
             agent: None,
             activity: activity::ActivityPane::default(),
             bridge: Some(bridge),
+            #[cfg(test)]
+            sent_actions: std::cell::RefCell::new(Vec::new()),
             window: None,
             hud_driver: None,
             hud_preview: None,
@@ -194,6 +198,10 @@ impl Ui {
     }
 
     fn send_action(&self, action: UiAction) {
+        #[cfg(test)]
+        if !self.fixture {
+            self.sent_actions.borrow_mut().push(action);
+        }
         if !self.fixture
             && let Some(bridge) = &self.bridge
         {
@@ -267,10 +275,7 @@ impl Ui {
         if self.doc.spacing() == spacing {
             return;
         }
-        self.edit(|doc| doc.set_spacing(spacing));
-        if self.error.is_none() {
-            self.send_action(UiAction::Retile);
-        }
+        self.edit_and_retile(|doc| doc.set_spacing(spacing));
     }
 
     pub fn mark_wrong(&self) {
@@ -314,6 +319,23 @@ impl Ui {
         }
         self.sync_hud_from_doc();
         self.look_up_apps();
+    }
+
+    /// Applies `edit`, saves, and retiles at once so rule, layout, and workspace
+    /// changes take effect immediately.
+    pub fn edit_and_retile(&mut self, edit: impl FnOnce(&mut Doc)) {
+        self.try_edit_and_retile(|doc| {
+            edit(doc);
+            Ok(())
+        });
+    }
+
+    /// Applies a fallible `edit`, saves, and retiles at once when the save succeeds.
+    pub fn try_edit_and_retile(&mut self, edit: impl FnOnce(&mut Doc) -> Result<(), String>) {
+        self.try_edit(edit);
+        if self.error.is_none() {
+            self.send_action(UiAction::Retile);
+        }
     }
 
     fn sync_hud_from_doc(&self) {
@@ -632,5 +654,51 @@ mod tests {
         // Security invariant: config doc is untouched.
         assert_eq!(ui.doc.hud(), initial_hud);
         assert_eq!(ui.doc.rules().len(), initial_rules);
+    }
+
+    #[test]
+    fn edit_and_retile_queues_retile_and_skips_on_error() {
+        let mut ui = playground::blank_fixture();
+        ui.fixture = false;
+        ui.doc = Doc::parse("version = 1\n");
+
+        ui.edit_and_retile(|doc| {
+            doc.add(
+                "com.tinyspeck.slackmacgap",
+                Place::Workspace(spaceman::WorkspaceId::TWO),
+            );
+        });
+        assert_eq!(ui.error, None);
+        assert_eq!(*ui.sent_actions.borrow(), vec![UiAction::Retile]);
+
+        let rule = ui.doc.rules()[0].clone();
+        ui.try_edit_and_retile(|doc| {
+            doc.place_matching(&rule, Place::Workspace(spaceman::WorkspaceId::FOUR))
+        });
+        assert_eq!(ui.error, None);
+        assert_eq!(
+            *ui.sent_actions.borrow(),
+            vec![UiAction::Retile, UiAction::Retile]
+        );
+
+        let moved = ui.doc.rules()[0].clone();
+        ui.try_edit_and_retile(|doc| doc.remove_matching(&moved));
+        assert_eq!(ui.error, None);
+        assert!(ui.doc.rules().is_empty());
+        assert_eq!(ui.sent_actions.borrow().len(), 3);
+
+        ui.edit_and_retile(|doc| doc.set_monitor(spaceman::WorkspaceId::SIX, Some("main")));
+        assert_eq!(ui.error, None);
+        assert_eq!(
+            ui.doc.monitor(spaceman::WorkspaceId::SIX).as_deref(),
+            Some("main")
+        );
+        assert_eq!(ui.sent_actions.borrow().len(), 4);
+
+        // A failed edit must not queue a retile.
+        ui.sent_actions.borrow_mut().clear();
+        ui.try_edit_and_retile(|_| Err("save failed".into()));
+        assert!(ui.error.is_some());
+        assert!(ui.sent_actions.borrow().is_empty());
     }
 }

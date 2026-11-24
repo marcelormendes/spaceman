@@ -152,7 +152,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if config.spacing() != self.config.spacing() {
             self.exact_spacing_workspaces.extend(WorkspaceId::all());
         }
-        config.configure_workspaces(&mut self.workspaces);
+        self.configure_workspaces_from(&config);
         self.config = config;
     }
 

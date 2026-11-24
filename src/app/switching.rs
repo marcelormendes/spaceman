@@ -772,7 +772,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// A floating window has no tile to carry it, so moving it to a workspace
     /// on screen on another display moves it there directly, keeping its size
     /// and its place relative to the display. A window already there stays.
-    fn carry_floating_window(
+    pub(super) fn carry_floating_window(
         &mut self,
         window: &crate::PhysicalWindowId,
         from: crate::Rect,

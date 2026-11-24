@@ -183,8 +183,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             focused.as_ref(),
             server_frames,
         );
+        self.relocate_reassigned_workspaces(&outputs, &visible, true, &mut failed);
         self.restore_visible(&visible, cancelled, &mut failed);
         self.park_inactive(&outputs, &visible, server_frames, cancelled, &mut failed);
+        self.relocate_reassigned_workspaces(&outputs, &visible, false, &mut failed);
         self.recover_stranded_visible(&outputs, &visible, server_frames, cancelled, &mut failed);
         if cancelled.load(Ordering::Acquire) {
             return Err("workspace operation cancelled".into());

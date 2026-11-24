@@ -363,7 +363,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if stay_floating {
             self.workspaces.own_floating(window.clone(), target);
         } else if was_tiled {
-            drop(self.workspaces.move_window(window, target));
+            let _ = self.workspaces.move_window(window, target);
             self.exit_fullscreen_if_split(target);
         } else {
             self.workspaces.forget_floating(window);
